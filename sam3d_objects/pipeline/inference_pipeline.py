@@ -272,12 +272,22 @@ class InferencePipeline:
             self.slat_std = torch.tensor(slat_std)
 
     def _module_by_name(self, name):
-        """Resolve a module by the name used in the low_vram stage annotations."""
+        """Resolve a module by the name used in the low_vram stage annotations.
+
+        Returns None when there is nothing movable under that name. depth_model in
+        particular is a plain DepthModel wrapper rather than an nn.Module, so
+        unwrap to the nn.Module it holds.
+        """
         if name in self.models:
             return self.models[name]
         if name in self.condition_embedders:
             return self.condition_embedders[name]
-        return getattr(self, name, None)
+        obj = getattr(self, name, None)
+        if obj is not None and not isinstance(obj, torch.nn.Module):
+            obj = getattr(obj, "model", None)
+        if not isinstance(obj, torch.nn.Module):
+            return None
+        return obj
 
     @contextmanager
     def _on_gpu(self, *module_names):

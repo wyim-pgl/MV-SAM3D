@@ -97,12 +97,15 @@ class InferencePipelinePointMap(InferencePipeline):
         self.layout_post_optimization_method = layout_post_optimization_method
         self.clip_pointmap_beyond_scale = clip_pointmap_beyond_scale
         super().__init__(*args, **kwargs)
-        if self.low_vram and isinstance(self.depth_model, torch.nn.Module):
+        if self.low_vram:
             # MV-SAM3D normally supplies pointmaps from DA3, so the built-in depth
-            # model is dead weight for most runs. Park it and page it in only if
-            # compute_pointmap actually has to fall back to it.
-            self.depth_model.to("cpu")
-            torch.cuda.empty_cache()
+            # model is dead weight for most runs. DepthModel.__init__ has already
+            # put it on the GPU by the time hydra hands it to us, so park it here
+            # and page it back in only if compute_pointmap falls back to it.
+            depth_module = self._module_by_name("depth_model")
+            if depth_module is not None:
+                depth_module.to("cpu")
+                torch.cuda.empty_cache()
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64
