@@ -19,6 +19,7 @@ Usage:
     python scripts/run_da3.py --image_dir ./data/example/images --output_dir ./da3_outputs/example --no_vis
 """
 
+import os
 import sys
 import argparse
 import numpy as np
@@ -26,25 +27,49 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 # ============================================================================
-# Path setup: DA3 should be a sibling directory to MV-SAM3D
+# Locating Depth Anything 3
+#
+# Upstream required a Depth-Anything-3 checkout sitting next to this repo and
+# raised at import time otherwise, which meant the script could not even be
+# --help'd without one. Prefer an installed depth_anything_3 package (see
+# INSTALL.md, which puts DA3 in the same env as MV-SAM3D) and treat a checkout as
+# a fallback, selectable with --da3_root or $DA3_ROOT.
 # ============================================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent  # MV-SAM3D root
-DA3_ROOT = PROJECT_ROOT.parent / "Depth-Anything-3"
 
-if not DA3_ROOT.exists():
-    raise FileNotFoundError(
-        f"Depth-Anything-3 not found at {DA3_ROOT}. "
-        f"Please ensure DA3 is installed as a sibling directory to MV-SAM3D:\n"
-        f"  parent_dir/\n"
-        f"  ├── MV-SAM3D/\n"
-        f"  └── Depth-Anything-3/"
-    )
 
-sys.path.insert(0, str(DA3_ROOT / "src"))
+def resolve_da3_root(explicit: Optional[str] = None) -> Optional[Path]:
+    """Return a Depth-Anything-3 checkout, or None if there is not one to find."""
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    if os.environ.get("DA3_ROOT"):
+        candidates.append(Path(os.environ["DA3_ROOT"]).expanduser())
+    candidates.append(PROJECT_ROOT.parent / "Depth-Anything-3")
 
-# Now we can import DA3
-from depth_anything_3.api import DepthAnything3
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
+def import_da3(da3_root: Optional[Path] = None):
+    """Import DepthAnything3, adding a checkout to sys.path only if needed."""
+    if da3_root is not None:
+        src = da3_root / "src"
+        if src.is_dir() and str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+    try:
+        from depth_anything_3.api import DepthAnything3
+    except ImportError as e:
+        raise ImportError(
+            "Could not import depth_anything_3.\n"
+            "Install it into this environment:\n"
+            "    pip install --no-deps -e /path/to/Depth-Anything-3\n"
+            "or point --da3_root / $DA3_ROOT at a Depth-Anything-3 checkout."
+        ) from e
+    return DepthAnything3
 
 
 def depth_to_pointmap(
@@ -110,6 +135,7 @@ def run_da3_inference(
     process_res: int = 504,
     save_visualization: bool = True,
     device: str = "cuda",
+    da3_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run DA3 on a folder of images.
@@ -132,15 +158,21 @@ def run_da3_inference(
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
+    resolved_root = resolve_da3_root(da3_root)
+    DepthAnything3 = import_da3(resolved_root)
+
     # Auto-detect model path if not provided
     if model_path is None:
         # Check common locations
         possible_paths = [
-            DA3_ROOT / "checkpoints" / "DA3NESTED-GIANT-LARGE",
-            DA3_ROOT / "checkpoints" / "DA3-GIANT-LARGE",
             Path.home() / ".cache" / "huggingface" / "hub" / "models--depth-anything--DA3NESTED-GIANT-LARGE",
         ]
+        if resolved_root is not None:
+            possible_paths[:0] = [
+                resolved_root / "checkpoints" / "DA3NESTED-GIANT-LARGE",
+                resolved_root / "checkpoints" / "DA3-GIANT-LARGE",
+            ]
         for p in possible_paths:
             if p.exists():
                 model_path = str(p)
@@ -321,7 +353,15 @@ Examples:
         default="cuda",
         help="Device to run on (default: cuda)"
     )
-    
+    parser.add_argument(
+        "--da3_root",
+        type=str,
+        default=None,
+        help="Path to a Depth-Anything-3 checkout. Only needed when DA3 is not "
+             "installed in this environment. Defaults to $DA3_ROOT, then to a "
+             "Depth-Anything-3 directory next to this repo."
+    )
+
     args = parser.parse_args()
     
     run_da3_inference(
@@ -331,6 +371,7 @@ Examples:
         process_res=args.process_res,
         save_visualization=not args.no_vis,
         device=args.device,
+        da3_root=args.da3_root,
     )
 
 

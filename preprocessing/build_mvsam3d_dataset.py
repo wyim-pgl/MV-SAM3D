@@ -79,6 +79,7 @@ def process_scene(
     prompts: Dict[str, str] = None,
     run_da3_flag: bool = False,
     sam3_checkpoint: Path = None,
+    sam3_root: Path = None,
 ) -> Dict:
     """
     处理单个场景
@@ -121,6 +122,7 @@ def process_scene(
     # 初始化 SAM3
     segmenter = SAM3MultiObjectSegmenter(
         checkpoint_path=sam3_checkpoint,
+        sam3_root=sam3_root,
         confidence_threshold=0.1
     )
     
@@ -190,8 +192,11 @@ def main():
     parser.add_argument("--run_da3", action="store_true", help="Run DA3 after segmentation")
     
     # SAM3
-    parser.add_argument("--sam3_checkpoint", type=str, default=None, 
-                        help="SAM3 checkpoint path (default: /mnt/workspace/users/lbc/sam3/checkpoints/sam3.pt)")
+    parser.add_argument("--sam3_checkpoint", type=str, default=None,
+                        help="SAM3 checkpoint path (default: $SAM3_CHECKPOINT)")
+    parser.add_argument("--sam3_root", type=str, default=None,
+                        help="Path to a SAM 3 checkout, if sam3 is not installed "
+                             "in this environment (default: $SAM3_ROOT)")
     
     args = parser.parse_args()
     
@@ -228,6 +233,7 @@ def main():
                 objects=objects,
                 run_da3_flag=args.run_da3,
                 sam3_checkpoint=Path(args.sam3_checkpoint) if args.sam3_checkpoint else None,
+                sam3_root=Path(args.sam3_root) if args.sam3_root else None,
             )
             results.append(result)
         
@@ -262,6 +268,7 @@ def main():
             objects=objects,
             run_da3_flag=args.run_da3,
             sam3_checkpoint=Path(args.sam3_checkpoint) if args.sam3_checkpoint else None,
+            sam3_root=Path(args.sam3_root) if args.sam3_root else None,
         )
         
         if not result['success']:

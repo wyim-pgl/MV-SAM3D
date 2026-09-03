@@ -1,40 +1,69 @@
 """
 SAM3 多物体分割模块
 """
+import os
 import sys
 import torch
 import numpy as np
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 from PIL import Image
 from loguru import logger
 
 
 class SAM3MultiObjectSegmenter:
     """SAM3 多物体分割器"""
-    
-    def __init__(self, checkpoint_path: Path = None, confidence_threshold: float = 0.1):
+
+    def __init__(
+        self,
+        checkpoint_path: Path = None,
+        confidence_threshold: float = 0.1,
+        sam3_root: Optional[Path] = None,
+    ):
         """
         初始化 SAM3 模型
-        
+
         Args:
-            checkpoint_path: SAM3 checkpoint 路径
+            checkpoint_path: SAM3 checkpoint path. Defaults to $SAM3_CHECKPOINT.
             confidence_threshold: 置信度阈值
+            sam3_root: Path to a SAM 3 checkout. Only needed when sam3 is not
+                installed in this environment. Defaults to $SAM3_ROOT.
         """
+        # Upstream hard-coded the original author's paths under /mnt/workspace,
+        # so this class could not run anywhere else. Both locations are now
+        # configurable and an installed sam3 package is preferred.
+        if checkpoint_path is None and os.environ.get("SAM3_CHECKPOINT"):
+            checkpoint_path = Path(os.environ["SAM3_CHECKPOINT"]).expanduser()
         if checkpoint_path is None:
-            checkpoint_path = Path("/mnt/workspace/users/lbc/sam3/checkpoints/sam3.pt")
-        
+            raise ValueError(
+                "No SAM3 checkpoint given. Pass --sam3_checkpoint, or set "
+                "$SAM3_CHECKPOINT to the sam3.pt you downloaded from "
+                "https://huggingface.co/facebook/sam3"
+            )
+        checkpoint_path = Path(checkpoint_path).expanduser()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"SAM3 checkpoint not found: {checkpoint_path}")
+
         self.checkpoint_path = checkpoint_path
         self.confidence_threshold = confidence_threshold
-        
-        # 添加 sam3 路径
-        sam3_path = Path("/mnt/workspace/users/lbc/sam3")
-        if sam3_path not in [Path(p) for p in sys.path]:
-            sys.path.insert(0, str(sam3_path))
-        
-        # 导入 SAM3
-        from sam3.model_builder import build_sam3_image_model
-        from sam3.model.sam3_image_processor import Sam3Processor
+
+        if sam3_root is None and os.environ.get("SAM3_ROOT"):
+            sam3_root = os.environ["SAM3_ROOT"]
+        if sam3_root is not None:
+            sam3_root = Path(sam3_root).expanduser().resolve()
+            if sam3_root.is_dir() and str(sam3_root) not in sys.path:
+                sys.path.insert(0, str(sam3_root))
+
+        try:
+            from sam3.model_builder import build_sam3_image_model
+            from sam3.model.sam3_image_processor import Sam3Processor
+        except ImportError as e:
+            raise ImportError(
+                "Could not import sam3. Install it into this environment or point "
+                "--sam3_root / $SAM3_ROOT at a SAM 3 checkout. Preprocessing is only "
+                "needed to generate masks; if you already have RGBA masks you can "
+                "skip it entirely."
+            ) from e
         
         # 加载模型
         logger.info(f"Loading SAM3 model from: {checkpoint_path}")

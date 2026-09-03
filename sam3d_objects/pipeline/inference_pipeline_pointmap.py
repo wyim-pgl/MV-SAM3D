@@ -97,6 +97,12 @@ class InferencePipelinePointMap(InferencePipeline):
         self.layout_post_optimization_method = layout_post_optimization_method
         self.clip_pointmap_beyond_scale = clip_pointmap_beyond_scale
         super().__init__(*args, **kwargs)
+        if self.low_vram and isinstance(self.depth_model, torch.nn.Module):
+            # MV-SAM3D normally supplies pointmaps from DA3, so the built-in depth
+            # model is dead weight for most runs. Park it and page it in only if
+            # compute_pointmap actually has to fall back to it.
+            self.depth_model.to("cpu")
+            torch.cuda.empty_cache()
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64
@@ -246,9 +252,10 @@ class InferencePipelinePointMap(InferencePipeline):
         loaded_image = loaded_image.permute(2, 0, 1).contiguous()[:3]
 
         if pointmap is None:
-            with torch.no_grad():
-                with torch.autocast(device_type="cuda", dtype=self.dtype):
-                    output = self.depth_model(loaded_image)
+            with self._on_gpu("depth_model"):
+                with torch.no_grad():
+                    with torch.autocast(device_type="cuda", dtype=self.dtype):
+                        output = self.depth_model(loaded_image)
             pointmaps = output["pointmaps"]
             camera_convention_transform = (
                 Transform3d()

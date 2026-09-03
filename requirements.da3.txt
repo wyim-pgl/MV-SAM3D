@@ -1,0 +1,24 @@
+# Depth Anything 3 runtime dependencies, minus the ones SAM 3D Objects already pins.
+#
+# torch, torchvision and xformers are deliberately absent. DA3 declares them
+# loosely (torch>=2, unpinned xformers) and letting pip resolve them here would
+# pull the whole stack off torch 2.5.1+cu121, which kaolin, spconv-cu121 and
+# xformers 0.0.28.post3 are built against. Install DA3 itself with --no-deps so
+# it inherits the environment that is already here.
+trimesh
+einops
+imageio
+numpy<2
+fastapi
+uvicorn
+requests
+typer>=0.9.0
+omegaconf
+evo
+e3nn
+moviepy==1.0.3
+plyfile
+pillow_heif
+safetensors
+huggingface_hub
+pycolmap

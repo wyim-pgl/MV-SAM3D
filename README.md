@@ -6,12 +6,34 @@ MV-SAM3D is a multi-view 3D reconstruction framework that extends SAM 3D Objects
 
 - arXiv: [https://arxiv.org/abs/2603.11633](https://arxiv.org/abs/2603.11633)
 
+> **This is a fork.** It adds a single-environment installer, 24 GB-VRAM support
+> and a handful of portability fixes on top of
+> [devinli123/MV-SAM3D](https://github.com/devinli123/MV-SAM3D). See
+> [INSTALL.md](./INSTALL.md#other-fixes-in-this-fork) for the full list of changes.
+
 ## Installation
 
-Please follow the environment setup from:
+```bash
+git clone https://github.com/wyim-pgl/MV-SAM3D
+cd MV-SAM3D
+./install.sh
+```
 
-- [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects)
-- [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3)
+This builds one environment containing both
+[SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects) and
+[Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3), patches
+hydra, and downloads the checkpoints.
+
+Two things to know before you start:
+
+- The SAM 3D Objects checkpoints are a **manually gated** Hugging Face repo.
+  Request access at <https://huggingface.co/facebook/sam-3d-objects> first, or run
+  `./install.sh --skip-checkpoints`.
+- Upstream requires **32 GB of VRAM**. On a 24 GB card (RTX 4090/3090, A5000) pass
+  `--low_vram` to the inference scripts.
+
+Full instructions, a manual step-by-step path and troubleshooting are in
+[INSTALL.md](./INSTALL.md).
 
 ## Data Format
 
@@ -124,6 +146,8 @@ python run_inference_weighted.py \
   --mask_prompt stuffed_toy \
   --da3_output ./da3_outputs/example/da3_output.npz
 ```
+
+On a 24 GB card, add `--low_vram`.
 
 ### Multi-object inference
 

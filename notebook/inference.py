@@ -2,7 +2,10 @@
 import os
 
 # not ideal to put that here
-os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
+# CONDA_PREFIX is only set inside an activated env; outside one (a bare venv, a
+# batch job that sources nothing) this used to raise KeyError on import.
+if "CUDA_HOME" not in os.environ and "CONDA_PREFIX" in os.environ:
+    os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
 os.environ["LIDRA_SKIP_INIT"] = "true"
 
 import sys
@@ -82,11 +85,14 @@ BLACKLIST_FILTERS = [
 class Inference:
     # public facing inference API
     # only put publicly exposed arguments here
-    def __init__(self, config_file: str, compile: bool = False):
+    def __init__(self, config_file: str, compile: bool = False, low_vram: bool = False):
         # load inference pipeline
         config = OmegaConf.load(config_file)
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
         config.compile_model = compile
+        # Keep the weights on the host and page them in one stage at a time.
+        # Needed to fit 24 GB cards; see INSTALL.md.
+        config.low_vram = low_vram
         config.workspace_dir = os.path.dirname(config_file)
         check_hydra_safety(config, WHITELIST_FILTERS, BLACKLIST_FILTERS)
         self._pipeline: InferencePipelinePointMap = instantiate(config)

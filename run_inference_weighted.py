@@ -33,7 +33,16 @@ Usage:
     python run_inference_weighted.py --input_path ./data --mask_prompt stuffed_toy --image_names 0,1,2,3 \
         --da3_output ./da3_outputs/example/da3_output.npz --stage2_weight_source visibility
 """
+import os
 import sys
+
+# expandable_segments cuts allocator fragmentation, which is the usual cause of a
+# 24 GB card dying partway through the slat stage rather than a single oversized
+# allocation. It has to be set before torch creates its caching allocator, so peek
+# at argv instead of waiting for the parsed args.
+if "--low_vram" in sys.argv and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import argparse
 from pathlib import Path
 import subprocess
@@ -2166,6 +2175,7 @@ def run_multiobject_inference(
     stage2_steps: int = 25,
     decode_formats: List[str] = None,
     model_tag: str = "hf",
+    low_vram: bool = False,
     # Stage 1 (Shape) Weighting parameters
     stage1_weighting: bool = True,
     stage1_entropy_layer: int = 9,
@@ -2279,6 +2289,7 @@ def run_multiobject_inference(
                 stage2_steps=stage2_steps,
                 decode_formats=decode_formats,
                 model_tag=model_tag,
+                low_vram=low_vram,
                 stage1_weighting=stage1_weighting,
                 stage1_entropy_layer=stage1_entropy_layer,
                 stage1_entropy_alpha=stage1_entropy_alpha,
@@ -2369,6 +2380,7 @@ def run_single_object_for_multiobject(
     stage2_steps: int = 25,
     decode_formats: List[str] = None,
     model_tag: str = "hf",
+    low_vram: bool = False,
     stage1_weighting: bool = True,
     stage1_entropy_layer: int = 9,
     stage1_entropy_alpha: float = 30.0,
@@ -2419,6 +2431,7 @@ def run_single_object_for_multiobject(
         stage2_steps=stage2_steps,
         decode_formats=decode_formats,
         model_tag=model_tag,
+        low_vram=low_vram,
         stage1_weighting=stage1_weighting,
         stage1_entropy_layer=stage1_entropy_layer,
         stage1_entropy_alpha=stage1_entropy_alpha,
@@ -2515,6 +2528,7 @@ def run_weighted_inference(
     stage2_steps: int = 25,
     decode_formats: List[str] = None,
     model_tag: str = "hf",
+    low_vram: bool = False,
     # Stage 1 (Shape) Weighting parameters
     stage1_weighting: bool = True,
     stage1_entropy_layer: int = 9,
@@ -2590,7 +2604,7 @@ def run_weighted_inference(
         raise FileNotFoundError(f"Model config file not found: {config_path}")
     
     logger.info(f"Loading model: {config_path}")
-    inference = Inference(config_path, compile=False)
+    inference = Inference(config_path, compile=False, low_vram=low_vram)
     
     if hasattr(inference._pipeline, 'rendering_engine'):
         if inference._pipeline.rendering_engine != "pytorch3d":
@@ -3872,6 +3886,13 @@ Examples:
     parser.add_argument("--mask_prompt", type=str, default=None, help="Mask folder name")
     parser.add_argument("--image_names", type=str, default=None, help="Image names (comma-separated)")
     parser.add_argument("--model_tag", type=str, default="hf", help="Model tag")
+    parser.add_argument(
+        "--low_vram",
+        action="store_true",
+        help="Keep model weights on the host and page them onto the GPU one stage "
+             "at a time. Drops the weight-side peak from ~13 GB to ~7 GB at the "
+             "cost of a host-to-device copy per stage. Needed on 24 GB cards.",
+    )
     
     # Inference parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -3999,6 +4020,7 @@ Examples:
                 stage2_steps=args.stage2_steps,
                 decode_formats=decode_formats,
                 model_tag=args.model_tag,
+                low_vram=args.low_vram,
                 # Stage 1 (Shape) weighting
                 stage1_weighting=not args.no_stage1_weighting,
                 stage1_entropy_layer=args.stage1_entropy_layer,
@@ -4045,6 +4067,7 @@ Examples:
                 stage2_steps=args.stage2_steps,
                 decode_formats=decode_formats,
                 model_tag=args.model_tag,
+                low_vram=args.low_vram,
                 # Stage 1 (Shape) weighting
                 stage1_weighting=not args.no_stage1_weighting,
                 stage1_entropy_layer=args.stage1_entropy_layer,

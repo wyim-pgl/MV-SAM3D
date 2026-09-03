@@ -5,18 +5,44 @@ from tqdm import tqdm
 import torch
 from loguru import logger
 from functools import wraps
+from contextlib import contextmanager
+from collections import Counter
 from torch.utils._pytree import tree_map_only
 
 
 def set_attention_backend():
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
+    """Select the attention backend from the GPU's compute capability.
 
-    logger.info(f"GPU name is {gpu_name}")
-    if "A100" in gpu_name or "H100" in gpu_name or "H200" in gpu_name:
-        # logger.info("Use flash_attn")
-        os.environ["ATTN_BACKEND"] = "flash_attn"
-        os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
+    Upstream hard-coded an A100/H100/H200 name whitelist, which left every other
+    card on the ``sdpa`` fallback. That matters most for sparse attention: the
+    flash_attn path uses ``flash_attn_varlen_*`` while the sdpa path materialises
+    a padded mask over the concatenated sequence, so consumer cards were paying a
+    large amount of VRAM for no reason. Any sm_80+ GPU (Ampere, Ada, Hopper) runs
+    FlashAttention-2, so gate on that instead and fall back cleanly when
+    flash_attn is not installed. An explicit ATTN_BACKEND always wins.
+    """
+    if os.environ.get("ATTN_BACKEND"):
+        logger.info(f"ATTN_BACKEND set by user: {os.environ['ATTN_BACKEND']}")
+        return
+    if not torch.cuda.is_available():
+        logger.warning("No CUDA device visible; leaving attention backend at its default")
+        return
+
+    gpu_name = torch.cuda.get_device_name(0)
+    major, minor = torch.cuda.get_device_capability(0)
+    logger.info(f"GPU name is {gpu_name} (sm_{major}{minor})")
+    if major < 8:
+        logger.info("Pre-Ampere GPU, keeping the sdpa attention backend")
+        return
+    try:
+        import flash_attn  # noqa: F401
+    except Exception as e:
+        logger.info(f"flash_attn unavailable ({e}); keeping the sdpa attention backend")
+        return
+
+    os.environ["ATTN_BACKEND"] = "flash_attn"
+    os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
+    logger.info("Using the flash_attn backend (set ATTN_BACKEND=sdpa to revert)")
 
 set_attention_backend()
 
@@ -46,6 +72,24 @@ from sam3d_objects.model.io import (
 from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
 from sam3d_objects.model.backbone.tdfy_dit.utils import postprocessing_utils
 from safetensors.torch import load_file
+
+
+def _stage(*module_names):
+    """Page the named modules onto the GPU for the duration of the method.
+
+    A no-op unless the pipeline was built with ``low_vram=True``. See
+    ``InferencePipeline._on_gpu``.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            with self._on_gpu(*module_names):
+                return fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class InferencePipeline:
@@ -91,9 +135,19 @@ class InferencePipeline:
         compile_model=False,
         slat_mean=SLAT_MEAN,
         slat_std=SLAT_STD,
+        low_vram=False,
     ):
         self.rendering_engine = rendering_engine
+        # Weights total ~13 GB in fp32 and upstream keeps every model resident.
+        # Under low_vram they are loaded to and parked on the host, then paged in
+        # one stage at a time, which drops the weight-side peak to the largest
+        # single model (~6.7 GB for ss_generator).
+        self.low_vram = low_vram
+        self._resident = Counter()
         self.device = torch.device(device)
+        # Where freshly loaded weights land. Under low_vram this is the host, so
+        # that startup never has to hold all of the models on the GPU at once.
+        self._init_device = torch.device("cpu") if low_vram else self.device
         self.compile_model = compile_model
         logger.info(f"self.device: {self.device}")
         logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', None)}")
@@ -195,12 +249,68 @@ class InferencePipeline:
             )
             logger.info("Loading model weights completed!")
 
+            if self.low_vram:
+                # Everything was loaded straight to the host by _init_device, so
+                # there is nothing to move here -- just report and release any
+                # transient allocations made while instantiating the modules.
+                torch.cuda.empty_cache()
+                logger.info(
+                    "low_vram enabled: weights parked on the host, paged in per stage"
+                )
+
             if self.compile_model:
-                logger.info("Compiling model...")
-                self._compile()
-                logger.info("Model compilation completed!")
+                if self.low_vram:
+                    logger.warning(
+                        "compile_model is incompatible with low_vram (compilation "
+                        "warms up against resident GPU weights); skipping compilation"
+                    )
+                else:
+                    logger.info("Compiling model...")
+                    self._compile()
+                    logger.info("Model compilation completed!")
             self.slat_mean = torch.tensor(slat_mean)
             self.slat_std = torch.tensor(slat_std)
+
+    def _module_by_name(self, name):
+        """Resolve a module by the name used in the low_vram stage annotations."""
+        if name in self.models:
+            return self.models[name]
+        if name in self.condition_embedders:
+            return self.condition_embedders[name]
+        return getattr(self, name, None)
+
+    @contextmanager
+    def _on_gpu(self, *module_names):
+        """Make the named modules resident on the GPU for the duration of the block.
+
+        A no-op unless the pipeline was built with ``low_vram=True``. Nesting is
+        reference counted, so an inner block never evicts weights an outer block
+        is still using. The cost is one host-to-device copy per stage; the gain is
+        that ss_generator (6.7 GB) and slat_generator (4.9 GB) -- which are never
+        needed at the same time -- no longer have to be resident together.
+        """
+        if not self.low_vram:
+            yield
+            return
+
+        modules = [
+            (name, self._module_by_name(name))
+            for name in module_names
+        ]
+        modules = [(name, m) for name, m in modules if m is not None]
+
+        for name, module in modules:
+            if self._resident[name] == 0:
+                module.to(self.device)
+            self._resident[name] += 1
+        try:
+            yield
+        finally:
+            for name, module in modules:
+                self._resident[name] -= 1
+                if self._resident[name] == 0:
+                    module.to("cpu")
+            torch.cuda.empty_cache()
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64
@@ -269,7 +379,7 @@ class InferencePipeline:
         model = instantiate(config)
 
         if ckpt_path.endswith(".safetensors"):
-            state_dict = load_file(ckpt_path, device="cuda")
+            state_dict = load_file(ckpt_path, device=str(device))
             if state_dict_fn is not None:
                 state_dict = state_dict_fn(state_dict)
             model.load_state_dict(state_dict, strict=False)
@@ -398,7 +508,7 @@ class InferencePipeline:
             config,
             os.path.join(self.workspace_dir, ss_generator_ckpt_path),
             state_dict_fn=state_dict_prefix_func,
-            device=self.device,
+            device=self._init_device,
         )
 
     def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
@@ -412,7 +522,7 @@ class InferencePipeline:
             config,
             os.path.join(self.workspace_dir, slat_generator_ckpt_path),
             state_dict_fn=state_dict_prefix_func,
-            device=self.device,
+            device=self._init_device,
         )
 
     def init_ss_encoder(self, ss_encoder_config_path, ss_encoder_ckpt_path):
@@ -426,7 +536,7 @@ class InferencePipeline:
             return self.instantiate_and_load_from_pretrained(
                 config,
                 os.path.join(self.workspace_dir, ss_encoder_ckpt_path),
-                device=self.device,
+                device=self._init_device,
                 state_dict_key=None,
             )
         else:
@@ -442,7 +552,7 @@ class InferencePipeline:
         return self.instantiate_and_load_from_pretrained(
             config,
             os.path.join(self.workspace_dir, ss_decoder_ckpt_path),
-            device=self.device,
+            device=self._init_device,
             state_dict_key=None,
         )
 
@@ -457,7 +567,7 @@ class InferencePipeline:
                     os.path.join(self.workspace_dir, slat_decoder_gs_config_path)
                 ),
                 os.path.join(self.workspace_dir, slat_decoder_gs_ckpt_path),
-                device=self.device,
+                device=self._init_device,
                 state_dict_key=None,
             )
 
@@ -469,7 +579,7 @@ class InferencePipeline:
                 os.path.join(self.workspace_dir, slat_decoder_mesh_config_path)
             ),
             os.path.join(self.workspace_dir, slat_decoder_mesh_ckpt_path),
-            device=self.device,
+            device=self._init_device,
             state_dict_key=None,
         )
 
@@ -486,7 +596,7 @@ class InferencePipeline:
                 state_dict_fn=filter_and_remove_prefix_state_dict_fn(
                     "_base_models.condition_embedder."
                 ),
-                device=self.device,
+                device=self._init_device,
             )
         else:
             return None
@@ -722,11 +832,14 @@ class InferencePipeline:
         ret = {}
         with torch.no_grad():
             if "mesh" in formats:
-                ret["mesh"] = self.models["slat_decoder_mesh"](slat)
+                with self._on_gpu("slat_decoder_mesh"):
+                    ret["mesh"] = self.models["slat_decoder_mesh"](slat)
             if "gaussian" in formats:
-                ret["gaussian"] = self.models["slat_decoder_gs"](slat)
+                with self._on_gpu("slat_decoder_gs"):
+                    ret["gaussian"] = self.models["slat_decoder_gs"](slat)
             if "gaussian_4" in formats:
-                ret["gaussian_4"] = self.models["slat_decoder_gs_4"](slat)
+                with self._on_gpu("slat_decoder_gs_4"):
+                    ret["gaussian_4"] = self.models["slat_decoder_gs_4"](slat)
         # if "radiance_field" in formats:
         #     ret["radiance_field"] = self.models["slat_decoder_rf"](slat)
         return ret
@@ -756,6 +869,7 @@ class InferencePipeline:
 
         return condition_args, condition_kwargs
 
+    @_stage("ss_generator", "ss_decoder", "ss_condition_embedder")
     def sample_sparse_structure(
         self, ss_input_dict: dict, inference_steps=None, use_distillation=False, attention_logger: Optional[Any] = None
     ):
@@ -835,6 +949,7 @@ class InferencePipeline:
         ss_generator.inference_steps = prev_inference_steps
         return return_dict
 
+    @_stage("slat_generator", "slat_condition_embedder")
     def sample_slat(
         self,
         slat_input: dict,
@@ -1006,6 +1121,7 @@ class InferencePipeline:
         
         return (all_conditions,), {}
 
+    @_stage("ss_generator", "ss_decoder", "ss_condition_embedder")
     def sample_sparse_structure_multi_view(
         self, 
         view_ss_input_dicts: List[dict], 
@@ -1200,6 +1316,7 @@ class InferencePipeline:
         ss_generator.inference_steps = prev_inference_steps
         return return_dict
 
+    @_stage("slat_generator", "slat_condition_embedder")
     def sample_slat_multi_view(
         self,
         view_slat_input_dicts: List[dict],
@@ -1280,6 +1397,7 @@ class InferencePipeline:
         slat_generator.inference_steps = prev_inference_steps
         return slat
 
+    @_stage("slat_generator", "slat_condition_embedder")
     def sample_slat_multi_view_weighted(
         self,
         view_slat_input_dicts: List[dict],
