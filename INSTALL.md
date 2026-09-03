@@ -44,6 +44,16 @@ access is a prerequisite, not an afterthought — without it the download return
 
 Until then, run `./install.sh --skip-checkpoints`; everything else installs fine.
 
+If someone on the machine already has the 13 GB downloaded, point at their copy
+instead of downloading it again — `install.sh` leaves an existing
+`checkpoints/hf` alone:
+
+```bash
+mkdir -p checkpoints
+ln -s /path/to/their/sam-3d-objects/checkpoints/hf checkpoints/hf
+./install.sh --skip-checkpoints
+```
+
 DA3 weights (`depth-anything/DA3NESTED-GIANT-LARGE`) are **not** gated and download
 automatically on first use.
 
@@ -178,6 +188,15 @@ It was built on a machine with no visible GPU. Rebuild on the GPU node:
 pip install --no-build-isolation --force-reinstall --no-cache-dir \
     "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47"
 ```
+
+**The install crawls, with hundreds of `Name or service not known` warnings.**
+`pypi.ngc.nvidia.com` does not resolve on every network. Upstream sets it as an
+extra index unconditionally, so pip retries *every package* against it five times
+with backoff before falling back to PyPI. `install.sh` probes both extra indexes
+and drops whichever does not resolve; if you are installing by hand, check with
+`getent hosts pypi.ngc.nvidia.com` and leave it out of `PIP_EXTRA_INDEX_URL` when
+it fails. Nothing in the dependency set actually needs that index —
+`download.pytorch.org/whl/cu121` is the one that matters.
 
 **`hf download` returns 403.** Access has not been granted yet. Check the state of
 your request on the model page while logged in.

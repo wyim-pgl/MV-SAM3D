@@ -73,7 +73,21 @@ log "Environment prefix: $ENV_PREFIX"
 
 export CUDA_HOME="$ENV_PREFIX"
 export MAX_JOBS="${MAX_JOBS:-$(( $(nproc) < 8 ? $(nproc) : 8 ))}"
-export PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu121"
+
+# Upstream sets both indexes unconditionally, but pypi.ngc.nvidia.com does not
+# resolve on every network. When it does not, pip retries every single package
+# against it five times with backoff before falling back to PyPI, turning a ten
+# minute step into an hour of warnings. Probe first and keep what answers.
+EXTRA_INDEXES=()
+for idx in "https://pypi.ngc.nvidia.com" "https://download.pytorch.org/whl/cu121"; do
+    idx_host="$(awk -F/ '{print $3}' <<<"$idx")"
+    if getent hosts "$idx_host" >/dev/null 2>&1; then
+        EXTRA_INDEXES+=("$idx")
+    else
+        printf 'note: %s does not resolve, dropping that index\n' "$idx_host"
+    fi
+done
+export PIP_EXTRA_INDEX_URL="${EXTRA_INDEXES[*]}"
 
 # ------------------------------------------------------- 2. sam3d-objects
 log "Installing sam3d_objects and core dependencies (this pulls torch 2.5.1+cu121)"
