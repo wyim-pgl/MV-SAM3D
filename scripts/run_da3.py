@@ -164,24 +164,28 @@ def run_da3_inference(
 
     # Auto-detect model path if not provided
     if model_path is None:
-        # Check common locations
-        possible_paths = [
-            Path.home() / ".cache" / "huggingface" / "hub" / "models--depth-anything--DA3NESTED-GIANT-LARGE",
-        ]
+        # Only real checkout directories are candidates here. Upstream also probed
+        # ~/.cache/huggingface/hub/models--depth-anything--DA3NESTED-GIANT-LARGE and
+        # handed it over as a local model dir, but weights live under
+        # snapshots/<sha>/ inside that tree, so once anything had populated the
+        # cache every subsequent run died with FileNotFoundError on
+        # .../models--depth-anything--DA3NESTED-GIANT-LARGE/model.safetensors.
+        # from_pretrained() with the repo id already resolves the cache itself.
+        possible_paths = []
         if resolved_root is not None:
-            possible_paths[:0] = [
+            possible_paths = [
                 resolved_root / "checkpoints" / "DA3NESTED-GIANT-LARGE",
                 resolved_root / "checkpoints" / "DA3-GIANT-LARGE",
             ]
         for p in possible_paths:
-            if p.exists():
+            if (p / "model.safetensors").exists():
                 model_path = str(p)
                 break
-        
+
         if model_path is None:
-            # Fall back to HuggingFace model ID
+            # Repo id: downloads on first use, then served from the HF cache.
             model_path = "depth-anything/DA3NESTED-GIANT-LARGE"
-            print(f"No local model found, will download from HuggingFace: {model_path}")
+            print(f"No local checkout found, using HuggingFace repo: {model_path}")
     
     print(f"Loading DA3 model from: {model_path}")
     model = DepthAnything3.from_pretrained(model_path).to(device)
