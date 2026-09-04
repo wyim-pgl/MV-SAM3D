@@ -24,13 +24,18 @@ This builds one environment containing both
 [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3), patches
 hydra, and downloads the checkpoints.
 
+Verified end to end on an RTX 4090 (24 GB, driver 560.35, CUDA 12.6): one
+environment, both projects, all imports, reconstruction running.
+
 Two things to know before you start:
 
 - The SAM 3D Objects checkpoints are a **manually gated** Hugging Face repo.
   Request access at <https://huggingface.co/facebook/sam-3d-objects> first, or run
-  `./install.sh --skip-checkpoints`.
-- Upstream requires **32 GB of VRAM**. On a 24 GB card (RTX 4090/3090, A5000) pass
-  `--low_vram` to the inference scripts.
+  `./install.sh --skip-checkpoints`. If the 13 GB is already somewhere on the
+  machine, symlink it in as `checkpoints/hf` and skip both.
+- Upstream states **32 GB of VRAM**. Measured here on a 3-view scene: **20.4 GB**
+  as upstream runs it, **12.5 GB** with `--low_vram`. So a 24 GB card fits either
+  way at this size, but only `--low_vram` leaves real headroom for more views.
 
 Full instructions, a manual step-by-step path and troubleshooting are in
 [INSTALL.md](./INSTALL.md).
@@ -138,16 +143,64 @@ Mask files are RGBA PNG where alpha indicates foreground.
 
 ## Quick Start
 
-### Single-object inference
+Three steps: masks, depth, reconstruction. The first two are prerequisites --
+`run_inference_weighted.py` needs a mask per object per view and will not produce
+one for you.
+
+### 1. Masks
+
+Skip this if you already have RGBA masks in the layout under **Data Format**.
+
+Upstream's `preprocessing/build_mvsam3d_dataset.py` uses SAM 3, whose checkpoints
+are gated, so this fork also ships an ungated path using SAM 1:
+
+```bash
+# one scene per photo
+python preprocessing/sam_segmenter.py --input ./photos --output ./data
+
+# group several views of one object into a single scene
+python preprocessing/sam_segmenter.py --input ./photos --output ./data \
+    --multiview tube=IMG_1153.jpg,IMG_1154.jpg,IMG_1155.jpg
+```
+
+It prints any mask that trips its heuristics and writes `mask_report.json`. **Look
+at the masks before reconstructing** -- a mask that grabbed the table instead of
+the object produces a confident, useless mesh.
+
+### 2. Depth and camera poses
+
+```bash
+python scripts/run_da3.py \
+  --image_dir ./data/example/images \
+  --output_dir ./da3_outputs/example
+```
+
+### 3. Reconstruction
 
 ```bash
 python run_inference_weighted.py \
   --input_path ./data/example \
   --mask_prompt stuffed_toy \
-  --da3_output ./da3_outputs/example/da3_output.npz
+  --da3_output ./da3_outputs/example/da3_output.npz \
+  --low_vram
 ```
 
-On a 24 GB card, add `--low_vram`.
+Outputs land in `visualization/<scene>/<object>/<scene>_<object>_<mode>_<ts>/`:
+`result.glb` (mesh with vertex colours), `result.ply` (Gaussian splat),
+`params.npz`, and `inference.log`.
+
+Drop `--low_vram` on a card with more than 24 GB.
+
+### Many scenes at once
+
+A per-scene subprocess reloads the 13 GB of weights every time -- about 40 s of
+loading against roughly 50 s of reconstruction. `run_batch.py` loads once and
+loops:
+
+```bash
+python scripts/run_batch.py --data ./data --mask_prompt object --low_vram
+python scripts/run_batch.py --data ./data --scenes 1124 1125 --skip_done
+```
 
 ### Multi-object inference
 

@@ -2529,6 +2529,7 @@ def run_weighted_inference(
     decode_formats: List[str] = None,
     model_tag: str = "hf",
     low_vram: bool = False,
+    inference=None,
     # Stage 1 (Shape) Weighting parameters
     stage1_weighting: bool = True,
     stage1_entropy_layer: int = 9,
@@ -2599,12 +2600,18 @@ def run_weighted_inference(
             merge_da3_glb: Merge SAM3D output with DA3 scene
             overlay_pointmap: Overlay SAM3D on View 0 pointmap
     """
-    config_path = f"checkpoints/{model_tag}/pipeline.yaml"
-    if not Path(config_path).exists():
-        raise FileNotFoundError(f"Model config file not found: {config_path}")
-    
-    logger.info(f"Loading model: {config_path}")
-    inference = Inference(config_path, compile=False, low_vram=low_vram)
+    if inference is None:
+        config_path = f"checkpoints/{model_tag}/pipeline.yaml"
+        if not Path(config_path).exists():
+            raise FileNotFoundError(f"Model config file not found: {config_path}")
+
+        logger.info(f"Loading model: {config_path}")
+        inference = Inference(config_path, compile=False, low_vram=low_vram)
+    else:
+        # Reusing a caller-owned pipeline. Loading the ~13 GB of weights takes
+        # about 40 s, so a per-scene subprocess spends more time loading than
+        # reconstructing; see scripts/run_batch.py.
+        logger.info("Reusing the caller-supplied Inference")
     
     if hasattr(inference._pipeline, 'rendering_engine'):
         if inference._pipeline.rendering_engine != "pytorch3d":

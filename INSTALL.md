@@ -149,11 +149,46 @@ the sdpa path materialises a padded mask over the concatenated sequence. The
 check now keys off compute capability (sm_80+) and falls back cleanly when
 flash_attn is not importable. Override with `ATTN_BACKEND=sdpa` if you need to.
 
-> **Not yet measured on hardware.** These changes are derived from the checkpoint
-> sizes and the pipeline's stage structure; peak VRAM has not been measured on a
-> 24 GB card, because the checkpoints are gated. If you hit an OOM anyway, the
-> next levers are `--decode_formats gaussian` (skip the mesh decoder) and fewer
-> input views.
+### Measured
+
+RTX 4090 (24 GB, driver 560.35, CUDA 12.6), one 3-view scene, peak reported by
+`nvidia-smi` across the whole run:
+
+| | peak VRAM | headroom |
+|---|---|---|
+| as upstream runs it | 20.4 GB | 4.2 GB |
+| `--low_vram` | 12.5 GB | 12.1 GB |
+
+So at three views a 24 GB card fits either way -- the 32 GB figure upstream quotes
+is not a hard floor for this size of job. What `--low_vram` buys is the ~8 GB of
+headroom you need before more views, more objects or a mesh decode pushes the
+default over the edge.
+
+If you still hit an OOM, the next levers are `--decode_formats gaussian` (skip the
+mesh decoder) and fewer input views.
+
+## Masks are a prerequisite
+
+`run_inference_weighted.py` needs an RGBA mask per object per view and will not
+make one for you. Upstream's `preprocessing/build_mvsam3d_dataset.py` uses SAM 3,
+whose checkpoints are *also* a manually gated HF repo, so on a fresh machine there
+is no working path to masks at all.
+
+This fork adds `preprocessing/sam_segmenter.py`, which uses the ungated
+`facebook/sam-vit-huge` through the transformers already in the environment:
+
+```bash
+python preprocessing/sam_segmenter.py --input ./photos --output ./data \
+    --multiview tube=IMG_1153.jpg,IMG_1154.jpg,IMG_1155.jpg
+```
+
+Note that SAM's own IoU score is the wrong thing to rank candidates by on ordinary
+photographs: a bench top or a floor is a large, clean, easy-to-segment region and
+outscores the subject. On a 30-photo test that picked the background in 7 cases,
+including all three views of the multi-view set. The script generates candidates
+from a centred box plus points down the vertical centre line and ranks them mostly
+on how little of the image border they cover, which is what actually separates an
+object from the surface under it. Check the masks anyway before reconstructing.
 
 ## Other fixes in this fork
 
