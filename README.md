@@ -212,36 +212,67 @@ photos through segmentation, depth and reconstruction) and `reconstruct_api.py`
 
 ### Multi-object inference
 
+Several objects in one scene, each with its own mask directory. `--merge_da3_glb`
+puts the reconstructions back into the DA3 scene, and `--run_pose_optimization`
+refines how they sit relative to each other.
+
 ```bash
 python run_inference_weighted.py \
-  --input_path ./data/desk_objects0 \
+  --input_path ./data/your_scene \
   --mask_prompt keyboard,speaker,mug,stuffed_toy \
-  --da3_output ./da3_outputs/desk_objects0/da3_output.npz \
+  --da3_output ./da3_outputs/your_scene/da3_output.npz \
   --merge_da3_glb \
-  --run_pose_optimization
+  --run_pose_optimization \
+  --low_vram
 ```
+
+`your_scene` has to be your own: the repo ships only the single-object
+`data/example`, so this command will not run as written.
 
 ## Default Settings (No Extra Flags)
 
-For single-object inference (`run_inference_weighted.py`), key defaults are:
+Key defaults for `run_inference_weighted.py`:
 
 - Stage 1 weighting: enabled (`stage1_entropy_alpha=30.0`)
 - Stage 2 weighting: enabled (`stage2_weight_source=entropy`)
 - Stage 2 alpha defaults: `stage2_entropy_alpha=30.0`, `stage2_visibility_alpha=30.0`
 
-## Preprocessing for a New Scene
+The weighting is what MV-SAM3D adds over single-view SAM 3D, so it only applies
+when there is more than one view. Feed a scene one image and both stages fall back
+to the plain path automatically. The output directory name records which ran:
+
+```
+facewash_object_mv_s1a30_s2e30_...     3 views, both stages weighted
+1155_object_single_s1off_s2off_...     1 view, weighting off
+```
+
+## Choosing a segmenter
+
+Masks are a hard prerequisite and there are two ways to get them.
+
+`preprocessing/sam_segmenter.py` (this fork) uses `facebook/sam-vit-huge`, which is
+ungated and already supported by the pinned transformers. It takes no text prompt:
+it finds the one dominant object per photo, which is the right tool when each photo
+is of a single subject.
+
+```bash
+python preprocessing/sam_segmenter.py --input ./photos --output ./data
+```
+
+`preprocessing/build_mvsam3d_dataset.py` (upstream) uses SAM 3 and segments by text
+prompt, so it handles several named objects in one scene. SAM 3's checkpoints are a
+**manually gated** HF repo, and you have to point the script at your own checkout:
 
 ```bash
 python preprocessing/build_mvsam3d_dataset.py \
   --input data/your_scene \
-  --objects keyboard,speaker,mug,stuffed_toy
+  --objects keyboard,speaker,mug,stuffed_toy \
+  --sam3_root /path/to/sam3 --sam3_checkpoint /path/to/sam3.pt
 ```
 
-```bash
-python scripts/run_da3.py \
-  --image_dir ./data/your_scene/images \
-  --output_dir ./da3_outputs/your_scene
-```
+Use upstream's when you need multiple named objects per scene and have SAM 3
+access; use this fork's otherwise. Either way, look at the masks before
+reconstructing.
 
 ## Citation
 
