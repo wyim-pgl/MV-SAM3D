@@ -102,3 +102,6 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+# Example run outputs
+/examples/output/

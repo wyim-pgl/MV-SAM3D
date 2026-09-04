@@ -33,9 +33,10 @@ Two things to know before you start:
   Request access at <https://huggingface.co/facebook/sam-3d-objects> first, or run
   `./install.sh --skip-checkpoints`. If the 13 GB is already somewhere on the
   machine, symlink it in as `checkpoints/hf` and skip both.
-- Upstream states **32 GB of VRAM**. Measured here on a 3-view scene: **20.4 GB**
-  as upstream runs it, **12.5 GB** with `--low_vram`. So a 24 GB card fits either
-  way at this size, but only `--low_vram` leaves real headroom for more views.
+- Upstream states **32 GB of VRAM**. Measured here on a 24.0 GiB card: 19.9 GiB
+  (3 views) and 21.9 GiB (8 views) as upstream runs it, against 12.2 and 14.0 GiB
+  with `--low_vram`. Both fit, but the default is down to 2.1 GiB of headroom at
+  eight views. See [examples/](./examples/).
 
 Full instructions, a manual step-by-step path and troubleshooting are in
 [INSTALL.md](./INSTALL.md).
@@ -201,6 +202,13 @@ loops:
 python scripts/run_batch.py --data ./data --mask_prompt object --low_vram
 python scripts/run_batch.py --data ./data --scenes 1124 1125 --skip_done
 ```
+
+### Runnable examples
+
+[`examples/`](./examples/) has all of the above as scripts that were run before
+being committed: `quickstart.sh` (bundled 8-view scene), `from_photos.sh` (raw
+photos through segmentation, depth and reconstruction) and `reconstruct_api.py`
+(the Python API, for embedding in your own code).
 
 ### Multi-object inference
 

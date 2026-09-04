@@ -151,18 +151,18 @@ flash_attn is not importable. Override with `ATTN_BACKEND=sdpa` if you need to.
 
 ### Measured
 
-RTX 4090 (24 GB, driver 560.35, CUDA 12.6), one 3-view scene, peak reported by
-`nvidia-smi` across the whole run:
+RTX 4090 (24.0 GiB, driver 560.35, CUDA 12.6), peak reported by `nvidia-smi`
+across the whole run:
 
-| | peak VRAM | headroom |
-|---|---|---|
-| as upstream runs it | 20.4 GB | 4.2 GB |
-| `--low_vram` | 12.5 GB | 12.1 GB |
+| scene | default | `--low_vram` | saved |
+|---|---|---|---|
+| 3 views | 19.9 GiB | 12.2 GiB | 7.7 GiB |
+| 8 views (`examples/quickstart.sh`) | 21.9 GiB | 14.0 GiB | 7.9 GiB |
 
-So at three views a 24 GB card fits either way -- the 32 GB figure upstream quotes
-is not a hard floor for this size of job. What `--low_vram` buys is the ~8 GB of
-headroom you need before more views, more objects or a mesh decode pushes the
-default over the edge.
+Both fit, so the 32 GB figure upstream quotes is not a hard floor at these sizes.
+But the default is down to **2.1 GiB of headroom at eight views**, and the trend is
+the point: `--low_vram` holds roughly 8 GiB back regardless of view count, which is
+the difference between "fits today" and "fits when the scene grows".
 
 If you still hit an OOM, the next levers are `--decode_formats gaussian` (skip the
 mesh decoder) and fewer input views.
