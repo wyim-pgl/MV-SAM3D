@@ -26,7 +26,7 @@ This example uses the photos from [issue #2](https://github.com/wyim-pgl/MV-SAM3
 
 **Multi-view** means observing a scene from several viewpoints; **multi-object** means reconstructing multiple objects within the scene separately. This example uses both. To reconstruct each bearing as an independent object, each one needs its own mask folder and a consistent ID across views.
 
-> **Latest result:** [SAM 3 text-only segmentation and two-view reconstruction](SAM3-Two-View-Walkthrough) are now verified. Original views `0.png` and `2.png` each yielded one cup and seven bearing masks without clicks or boxes. Both objects completed reconstruction and pose optimization. Ground contact and physical volumes remain separate, unverified steps.
+> **Latest result:** [SAM 3 text-only segmentation and two-view reconstruction](SAM3-Two-View-Walkthrough) are now verified. Original views `0.png` and `2.png` each yielded one cup and seven bearing masks without clicks or boxes. Both objects completed reconstruction and pose optimization. A [separate ground-alignment pass](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table) now verifies floor contact for the cup and bearing-group meshes. Individual-bearing contact and physical volumes remain unverified.
 
 The results below describe the earlier **three-view SAM 1 box-prompted experiment**. The new walkthrough includes separate SAM 3 inputs, commands, and results.
 

@@ -146,7 +146,7 @@ Inspect the following:
 - Are relative placement and size reasonably consistent with the photographs?
 - Does pose optimization actually improve the result?
 
-**Ground contact is separate:** pose optimization does not constrain objects to a flat support plane or guarantee contact at Z=0. The displayed optimized result is not a validated grounded result. A final ground-aligned export has not yet been verified.
+**Ground contact is separate:** pose optimization does not constrain objects to a flat support plane or guarantee contact at Z=0. The three-view result on this page is not ground-aligned. The newer two-view SAM 3 result has a [separately verified ground-aligned export](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table).
 
 ## 6. Physical scale calibration is a separate step
 

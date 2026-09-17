@@ -219,6 +219,40 @@ Full model checkpoints, large GLBs, and raw execution logs are not committed. Th
 - No interactive prompts were used, but prompts, threshold, and the intended count were supplied explicitly and results were visually reviewed.
 - Seven selected bearing masks do not certify seven accurate, separately measurable 3D bearings.
 - Group masks can preserve disconnected regions. Persistent per-instance IDs across views are separate planned work.
-- Pose optimization does not enforce a flat floor or Z=0 contact. A final grounded export is not validated here.
+- Pose optimization itself does not enforce a flat floor. The separate postprocessing step below verifies floor contact for the cup and bearing-group meshes; it does not certify contact for every individual bearing surface.
 - Reference-volume calibration and cup-capacity measurement are not implemented by this workflow. See `docs/TODO.md` in the repository for the planned volume and disconnected-instance tasks.
 - These are local, verified changes. No GitHub push has been performed.
+
+## 10. Align the reconstructed objects to the photographed table
+
+A separate postprocessing pass corrected the floating placement without rerunning generation or changing object colors. The original optimized GLB is preserved.
+
+![Ground-aligned cup and bearing group, viewed from two directions](assets/issue2-grounded-preview.jpg)
+
+Procedure used for this specific scene:
+
+1. Select visible table samples in original view 0's DA3 point map: vertical range 66–95% of the image, horizontal ranges 8–35% and 65–92%. These regions avoid the cup and bearing row. This is a scene-specific table selection, not a general automatic floor detector.
+2. Transform those samples to the same aligned frame as the reconstructed GLB using DA3 camera extrinsics and `hf_alignment`.
+3. Fit a table plane with seeded RANSAC and refine its normal with SVD. Rotate the common frame so the table becomes the working Z=0 plane.
+4. Apply small rigid rotations around each object's centroid: align the cup's principal axis upright (about 3.73 degrees) and make the bearing row's principal axis horizontal (about 0.64 degrees). Preserve each object's centroid in the table's XY plane.
+5. Translate each object only vertically until its lowest vertex reaches Z=0. The cup moved downward; the bearing group moved slightly upward. No scale or vertex-color changes were made.
+6. Export an objects-only GLB and a second GLB with a visible support plane. The plane's top is at the same contact height.
+
+The working coordinate system is Z-up. Standard glTF is Y-up, so exports include the coordinate conversion: the floor is at **glTF Y=0**, and Blender's standard importer places it at **Blender Z=0**. Do not apply an additional manual axis conversion after import.
+
+The exported GLBs were reloaded and checked: cup and bearing-group minimum world-space glTF Y are both 0, and the support plane's maximum Y is 0. Object vertex counts, faces, and vertex colors match the original. [Recorded export checks](assets/issue2-grounding-checks.json) include file hashes and bounds.
+
+Local outputs:
+
+```text
+artifacts/issue2-sam3-validation/grounded/
+├── result_multiobj_grounded.glb             # Two object meshes only
+├── result_multiobj_grounded_with_floor.glb  # Two objects plus support plane
+├── grounded_preview.jpg
+├── grounding_report.json
+└── grounding_checks.json
+```
+
+Open `result_multiobj_grounded_with_floor.glb` to inspect contact visually. The floor is a visualization aid, not an additional reconstructed physical object or a volume-calibration reference.
+
+**Limits:** this preserves table-plane centroid placement and object geometry, not exact pixel reprojection after changing heights and tilts. Contact was verified for each of the two object meshes as a whole. The generated bearing row contains connected surfaces and uneven radii; rigidly grounding the group does not guarantee that every individual bearing surface touches the plane exactly. No physical units or volume accuracy are established by this alignment.

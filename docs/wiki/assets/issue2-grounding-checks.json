@@ -1,0 +1,46 @@
+{
+  "result_multiobj_grounded.glb": {
+    "geometry_count": 2,
+    "bytes": 22333692,
+    "sha256": "d4d18911404335267f35343d93899c660a516f84f58aaaa1d9262a45f1ef23fc",
+    "nodes": [
+      {
+        "node": "object_0_red_cup",
+        "vertices": 480438,
+        "min_gltf_y": 0.0,
+        "max_gltf_y": 0.26408928632736206
+      },
+      {
+        "node": "object_1_ball_bearings",
+        "vertices": 77918,
+        "min_gltf_y": 0.0,
+        "max_gltf_y": 0.018797140568494797
+      }
+    ]
+  },
+  "result_multiobj_grounded_with_floor.glb": {
+    "geometry_count": 3,
+    "bytes": 22334832,
+    "sha256": "03c7c68edb4ba77cb8d4c360ed4ca09d9fdb1bc1d9afffa64770a6489c329de4",
+    "nodes": [
+      {
+        "node": "table_z0",
+        "vertices": 8,
+        "min_gltf_y": -0.0020000000949949026,
+        "max_gltf_y": 0.0
+      },
+      {
+        "node": "object_0_red_cup",
+        "vertices": 480438,
+        "min_gltf_y": 0.0,
+        "max_gltf_y": 0.26408928632736206
+      },
+      {
+        "node": "object_1_ball_bearings",
+        "vertices": 77918,
+        "min_gltf_y": 0.0,
+        "max_gltf_y": 0.018797140568494797
+      }
+    ]
+  }
+}
