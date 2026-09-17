@@ -4,7 +4,7 @@
 
 This walkthrough reconstructs the red cup and bearing group in [issue #2](https://github.com/wyim-pgl/MV-SAM3D/issues/2). Prepare the three photographs and **six object-specific RGBA masks** described in [Data Preparation](Data-Preparation).
 
-> **Scope of the completed experiment:** the commands and results below use three views and SAM 1 masks generated from manually specified boxes. SAM 3 checkpoint access is pending. The subsequently requested SAM 3 run using only original views `0.png` and `2.png` has not been performed. Do not interpret these results as validation of text-only segmentation or a seven-bearing two-view reconstruction.
+> **Scope of this page:** the commands and results below document the earlier three-view SAM 1 experiment with manually specified boxes. The newer [SAM 3 text-only two-view walkthrough](SAM3-Two-View-Walkthrough) is also complete and uses only original views `0.png` and `2.png`. Keep the input bundles and results of the two experiments separate.
 
 ```text
 3 photographs + 3 cup masks + 3 bearing-group masks

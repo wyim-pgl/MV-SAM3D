@@ -2,7 +2,7 @@
 
 [Installation](Installation) · Next: [Running](Running)
 
-> **Current status:** SAM 3 checkpoint access is pending. The requested text-only segmentation run will use original views `0.png` and `2.png`, with one cup and seven visible bearings per image. That run has not been performed. The three-view inputs and results below are the earlier, validated **SAM 1 box-prompted** experiment, not SAM 3 results.
+> **Latest workflow:** the [SAM 3 text-only two-view run](SAM3-Two-View-Walkthrough) is now verified, using original views `0.png` and `2.png`, one cup, and seven visible bearings per image. Its [input bundle](assets/issue2-sam3-inputs.zip) is separate. The three-view inputs below belong to the earlier **SAM 1 box-prompted** experiment.
 
 ## Download the validated images and masks
 
@@ -48,7 +48,7 @@ The downloaded resolutions are **381×668, 502×668, and 502×668**, respectivel
 
 For new captures, keep the objects fixed relative to one another and move only the camera. The capture conditions and physical dimensions in issue #2 have not been verified. Small reflective bearings and limited viewpoints can reduce reconstruction quality.
 
-### Two-view selection for the pending SAM 3 run
+### Two-view selection for the SAM 3 run
 
 Use only original views `0.png` and `2.png`; exclude the eight-bearing view `1.png`. Keep this dataset separate from the completed experiment:
 
@@ -58,9 +58,9 @@ cp -n data/issue2_cup_bearings/images/0.png data/issue2_seven_bearings/images/0.
 cp -n data/issue2_cup_bearings/images/2.png data/issue2_seven_bearings/images/2.png
 ```
 
-The intended workflow is text-prompted detection of a cup and metal bearings, duplicate removal, and validation of **one cup and seven visible bearings in each image**. Count-aware selection is not implemented in the current SAM 3 wrapper. Merely adding “seven” to a text prompt does not enforce the count. Insufficient detections must be flagged rather than padded with fabricated masks.
+The verified workflow uses text-prompted detection, duplicate removal, and explicit `--counts 1,7` to select **one cup and seven visible bearings in each image**. Merely adding “seven” to a text prompt does not enforce the count. Insufficient distinct detections cause failure rather than fabricated masks.
 
-SAM 3 masks, two-view DA3 output, and the resulting reconstruction are still pending. Do not reuse the three-view DA3 file for this dataset.
+SAM 3 masks, two-view DA3, reconstruction, and pose optimization have completed. See the [step-by-step commands and results](SAM3-Two-View-Walkthrough). Do not reuse the three-view DA3 file for this dataset.
 
 ## 2. Required directory layout for the validated experiment
 
@@ -107,21 +107,24 @@ A bearing-group mask may contain disconnected regions. The group is nevertheless
 
 ### Option B: generate draft masks with SAM 3, then review
 
-This option requires approved checkpoint access and the SAM 3 setup described in [Installation](Installation). It has **not** been executed for the pending two-view experiment. The existing general CLI can be called from the repository root as follows:
+This option requires approved checkpoint access and the separate SAM 3 environment described in [Installation](Installation). Use the tested two-view dataset and explicit per-category prompts/counts:
 
 ```bash
 python preprocessing/build_mvsam3d_dataset.py \
-  --input data/issue2_cup_bearings \
+  --input data/issue2_seven_bearings \
   --objects red_cup,ball_bearings \
+  --prompts 'red cup,metal ball bearing' \
+  --counts 1,7 \
+  --confidence_threshold 0.3 \
   --sam3_root "$SAM3_ROOT" \
   --sam3_checkpoint "$SAM3_CHECKPOINT"
 ```
 
-The CLI passes each object name directly as the SAM 3 text prompt. Review and correct inaccurate masks.
+When `--prompts` is omitted, object names become the text prompts. When `--counts` is omitted, selection defaults to one instance per object. Specify both for the bearing-group example. Review the masks even when their counts match.
 
-**Important for bearings:** the current `SAM3MultiObjectSegmenter` saves only the **highest-scoring mask** per image. A prompt named `ball_bearings` does not guarantee that all bearings will be merged. If it selects only one bearing, add the others manually or use Option A. A count-aware automatic workflow requires a separate code change. The SAM 1 `sam_segmenter.py` CLI is not a text-based multi-object selector and is not a replacement for generating both masks automatically.
+The updated selector unions the highest-scoring requested number of nonempty, distinct masks and preserves disconnected regions. It rejects insufficient detections and requires every view to succeed before a scene is ready. `segmentation_report.json` records per-view candidate counts, selected counts, and scores. Use fresh output directories: a failed view invalidates its old mask, but an initialization failure can leave earlier files on disk. A new run invalidates the old success report, and any failed report must block reconstruction.
 
-A preprocessing success message does not mean every view is ready: the current SAM 3 wrapper can report success for an object when only some views produced masks.
+The SAM 1 `sam_segmenter.py` CLI is not text-based and does not provide this count-aware multi-object workflow. The earlier SAM 1 experiment used a separate script with manually specified boxes.
 
 ## 4. Check three views × two objects
 

@@ -11,6 +11,29 @@ from PIL import Image
 from loguru import logger
 
 
+def select_instance_indices(masks, scores, expected_count, iou_threshold=0.5):
+    """Select distinct, nonempty instances by score; never pad missing objects."""
+    if not isinstance(expected_count, (int, np.integer)) or expected_count < 1:
+        raise ValueError("Expected count must be a positive integer")
+    masks = np.asarray(masks, dtype=bool)
+    scores = np.asarray(scores)
+    if masks.ndim != 3 or scores.shape != (len(masks),) or not np.isfinite(scores).all():
+        raise ValueError("Expected masks (N,H,W) and finite scores (N,)")
+    selected = []
+    for index in np.argsort(-scores, kind='stable'):
+        candidate = masks[index]
+        if not candidate.any():
+            continue
+        if any(np.logical_and(candidate, masks[j]).sum() /
+               np.logical_or(candidate, masks[j]).sum() > iou_threshold
+               for j in selected):
+            continue
+        selected.append(int(index))
+        if len(selected) == expected_count:
+            return selected
+    raise ValueError(f"Expected {expected_count} distinct instances, found {len(selected)}")
+
+
 class SAM3MultiObjectSegmenter:
     """SAM3 多物体分割器"""
 
@@ -80,6 +103,7 @@ class SAM3MultiObjectSegmenter:
         object_name: str,
         text_prompt: str,
         output_dir: Path,
+        expected_count: int = 1,
     ) -> Dict:
         """
         对多个视角的图像分割同一个物体
@@ -119,6 +143,7 @@ class SAM3MultiObjectSegmenter:
         # 对每个视角进行分割
         success_count = 0
         failed_views = []
+        view_reports = []
         
         for i, img_path in enumerate(image_files):
             try:
@@ -126,27 +151,22 @@ class SAM3MultiObjectSegmenter:
                 image = Image.open(img_path).convert('RGB')
                 
                 # SAM3 分割（按照SAM4D的方式）
-                inference_state = self.processor.set_image(image)
-                output = self.processor.set_text_prompt(
-                    state=inference_state,
-                    prompt=text_prompt
-                )
+                with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16):
+                    inference_state = self.processor.set_image(image)
+                    output = self.processor.set_text_prompt(
+                        state=inference_state,
+                        prompt=text_prompt
+                    )
                 
                 masks = output["masks"]
                 scores = output["scores"]
                 
-                if len(masks) == 0:
-                    logger.warning(f"  View {i}: No mask generated (confidence too low)")
-                    failed_views.append(i)
-                    continue
-                
-                # 选择最高分的 mask
-                best_idx = scores.argmax().item()
-                best_mask = masks[best_idx]
-                best_score = scores[best_idx].item()
-                
-                # 转换为 numpy（按照SAM4D的方式）
-                mask_np = best_mask.squeeze(0).cpu().numpy() if torch.is_tensor(best_mask) else best_mask.squeeze(0)
+                masks_np = masks.detach().cpu().numpy() if torch.is_tensor(masks) else np.asarray(masks)
+                scores_np = scores.float().detach().cpu().numpy() if torch.is_tensor(scores) else np.asarray(scores)
+                masks_np = masks_np[:, 0]  # SAM 3 returns (N,1,H,W).
+                selected = select_instance_indices(masks_np, scores_np, expected_count)
+                mask_np = np.logical_or.reduce(masks_np[selected])
+                selected_scores = scores_np[selected].tolist()
                 
                 # 确保 mask 和原图尺寸一致
                 if mask_np.shape != (image.size[1], image.size[0]):
@@ -175,14 +195,20 @@ class SAM3MultiObjectSegmenter:
                 # 计算 mask 面积（使用 alpha 通道）
                 area_ratio = np.sum(rgba_mask[:, :, 3] > 0) / (rgba_mask.shape[0] * rgba_mask.shape[1])
                 
-                logger.info(f"  View {i}: ✓ (area={area_ratio*100:.1f}%, score={best_score:.3f})")
+                view_reports.append({'image': img_path.name, 'candidate_count': len(scores_np),
+                                     'selected_count': len(selected), 'scores': selected_scores,
+                                     'area_ratio': float(area_ratio)})
+                logger.info(f"  View {i}: ✓ (instances={len(selected)}, area={area_ratio*100:.1f}%)")
                 success_count += 1
                 
             except Exception as e:
+                # A failed rerun must not leave this view's old mask usable.
+                (mask_dir / f"{img_path.stem}.png").unlink(missing_ok=True)
                 logger.error(f"  View {i}: Failed - {e}")
                 import traceback
                 traceback.print_exc()
                 failed_views.append(i)
+                view_reports.append({'image': img_path.name, 'error': str(e)})
         
         # 总结
         logger.info(f"  Result: {success_count}/{len(image_files)} views segmented")
@@ -190,7 +216,11 @@ class SAM3MultiObjectSegmenter:
             logger.warning(f"  Failed views: {failed_views}")
         
         return {
-            'success': success_count > 0,
+            'success': success_count == len(image_files),
+            'expected_count': expected_count,
+            'text_prompt': text_prompt,
+            'confidence_threshold': self.confidence_threshold,
+            'views': view_reports,
             'object_name': object_name,
             'total_views': len(image_files),
             'success_views': success_count,

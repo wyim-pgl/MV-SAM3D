@@ -3,7 +3,8 @@
 - [Project Introduction](Home)
 - [Installation and Setup](Installation)
 - [Data Preparation](Data-Preparation)
-- [Running: Issue #2 Multi-Object Example](Running)
+- [Running: Earlier SAM 1 Example](Running)
+- [SAM 3: Text-Only, Two-View Walkthrough](SAM3-Two-View-Walkthrough)
 - [Model Architecture](Model-Architecture)
 
 ---

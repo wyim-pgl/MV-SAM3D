@@ -26,7 +26,7 @@ Distinguish between these models:
 
 Approval for SAM 3D Objects does not make SAM 3 ready to use. SAM 3 is unnecessary if you provide your own RGBA masks.
 
-> **Current status:** SAM 3 model access is pending. Validated results use SAM 1 with manually specified boxes on the original three views. The requested SAM 3 run using only original views 0 and 2 (seven visible bearings) has not run.
+> **Verified SAM 3 setup:** Model access was granted, and the two-view text-only workflow completed in a separate `sam3-mask` environment. See the [SAM 3 walkthrough](SAM3-Two-View-Walkthrough) for the tested package versions, checkpoint revision, and commands. New users still need their own authorized access.
 
 ## 3. Installation
 

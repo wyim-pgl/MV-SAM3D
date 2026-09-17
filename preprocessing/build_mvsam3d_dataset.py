@@ -15,6 +15,7 @@ MV-SAM3D 数据预处理主脚本
         --scenes dog_cat_table,dog_table,dog_cat_table_sofa
 """
 import sys
+import json
 import argparse
 import subprocess
 from pathlib import Path
@@ -80,6 +81,8 @@ def process_scene(
     run_da3_flag: bool = False,
     sam3_checkpoint: Path = None,
     sam3_root: Path = None,
+    counts: Dict[str, int] = None,
+    confidence_threshold: float = 0.1,
 ) -> Dict:
     """
     处理单个场景
@@ -105,6 +108,10 @@ def process_scene(
         'steps': {},
     }
     
+    # Invalidate any earlier successful report before starting a new run.
+    report_path = scene_dir / 'segmentation_report.json'
+    report_path.write_text(json.dumps(result, indent=2))
+
     # Step 1: 数据组织
     logger.info("\n[Step 1/3] Organizing images...")
     org_result = organize_images(scene_dir)
@@ -112,6 +119,7 @@ def process_scene(
     
     if not org_result['success']:
         logger.error("  Failed to organize images")
+        report_path.write_text(json.dumps(result, indent=2, default=str))
         return result
     
     images_dir = scene_dir / "images"
@@ -120,11 +128,17 @@ def process_scene(
     logger.info("\n[Step 2/3] SAM3 segmentation...")
     
     # 初始化 SAM3
-    segmenter = SAM3MultiObjectSegmenter(
-        checkpoint_path=sam3_checkpoint,
-        sam3_root=sam3_root,
-        confidence_threshold=0.1
-    )
+    try:
+        segmenter = SAM3MultiObjectSegmenter(
+            checkpoint_path=sam3_checkpoint,
+            sam3_root=sam3_root,
+            confidence_threshold=confidence_threshold
+        )
+    except Exception as exc:
+        result['error'] = str(exc)
+        report_path.write_text(json.dumps(result, indent=2, default=str))
+        logger.error(f"SAM 3 initialization failed: {exc}")
+        return result
     
     # 对每个物体进行分割
     seg_results = []
@@ -141,6 +155,7 @@ def process_scene(
             object_name=obj_name,
             text_prompt=prompt,
             output_dir=scene_dir,
+            expected_count=counts.get(obj_name, 1) if counts else 1,
         )
         seg_results.append(seg_result)
     
@@ -152,16 +167,17 @@ def process_scene(
         logger.warning("  Some objects failed to segment")
     
     # Step 3: DA3 处理
-    if run_da3_flag:
+    if run_da3_flag and all_success:
         logger.info("\n[Step 3/3] DA3 processing...")
         da3_success = run_da3(scene_dir)
         result['steps']['da3'] = {'success': da3_success}
     else:
-        logger.info("\n[Step 3/3] DA3 processing skipped (use --run_da3 to enable)")
+        logger.info("\n[Step 3/3] DA3 skipped (requires --run_da3 and masks for every view)")
         result['steps']['da3'] = {'success': None, 'skipped': True}
     
     # 最终结果
-    result['success'] = all_success
+    result['success'] = all_success and (not run_da3_flag or result['steps']['da3']['success'] is True)
+    report_path.write_text(json.dumps(result, indent=2, default=str))
     
     logger.info(f"\n{'='*60}")
     if result['success']:
@@ -182,6 +198,10 @@ def main():
     # 输入
     parser.add_argument("--input", type=str, help="Scene directory (e.g., data/dog_cat_table)")
     parser.add_argument("--objects", type=str, help="Comma-separated object names (e.g., dog,cat,table)")
+    parser.add_argument("--prompts", help="Comma-separated text prompts matching --objects (single scene)")
+    parser.add_argument("--counts", help="Comma-separated positive instance counts matching --objects (single scene)")
+    parser.add_argument("--confidence_threshold", type=float, default=0.1,
+                        help="SAM 3 detection threshold in [0,1] (default: 0.1)")
     
     # 批量处理
     parser.add_argument("--batch", action="store_true", help="Batch processing mode")
@@ -199,6 +219,10 @@ def main():
                              "in this environment (default: $SAM3_ROOT)")
     
     args = parser.parse_args()
+    if not 0 <= args.confidence_threshold <= 1:
+        parser.error('--confidence_threshold must be in [0,1]')
+    if args.batch and (args.prompts is not None or args.counts is not None):
+        parser.error('--prompts and --counts require single-scene --input mode')
     
     # 批量处理模式
     if args.batch:
@@ -234,6 +258,7 @@ def main():
                 run_da3_flag=args.run_da3,
                 sam3_checkpoint=Path(args.sam3_checkpoint) if args.sam3_checkpoint else None,
                 sam3_root=Path(args.sam3_root) if args.sam3_root else None,
+                confidence_threshold=args.confidence_threshold,
             )
             results.append(result)
         
@@ -262,6 +287,17 @@ def main():
             sys.exit(1)
         
         objects = [o.strip() for o in args.objects.split(',') if o.strip()]
+        if not objects or len(set(objects)) != len(objects):
+            parser.error('--objects must contain unique, nonempty names')
+        prompts = [p.strip() for p in args.prompts.split(',')] if args.prompts is not None else objects
+        try:
+            counts = [int(c.strip()) for c in args.counts.split(',')] if args.counts is not None else [1] * len(objects)
+        except ValueError:
+            parser.error('--counts must contain positive integers')
+        if len(prompts) != len(objects) or not all(prompts):
+            parser.error('--prompts must contain one nonempty prompt per object')
+        if len(counts) != len(objects) or any(c < 1 for c in counts):
+            parser.error('--counts must contain one positive integer per object')
         
         result = process_scene(
             scene_dir=scene_dir,
@@ -269,6 +305,9 @@ def main():
             run_da3_flag=args.run_da3,
             sam3_checkpoint=Path(args.sam3_checkpoint) if args.sam3_checkpoint else None,
             sam3_root=Path(args.sam3_root) if args.sam3_root else None,
+            prompts=dict(zip(objects, prompts)),
+            counts=dict(zip(objects, counts)),
+            confidence_threshold=args.confidence_threshold,
         )
         
         if not result['success']:

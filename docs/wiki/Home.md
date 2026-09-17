@@ -12,6 +12,8 @@ This repository is a fork of [devinli123/MV-SAM3D](https://github.com/devinli123
 4. [Running: Reconstructing Multiple Objects from Issue #2](Running)
 5. [Model Architecture](Model-Architecture)
 
+Latest step-by-step example: [SAM 3: two views, no clicks or boxes](SAM3-Two-View-Walkthrough).
+
 ## This Example: Red Cup + Ball Bearings
 
 This example uses the photos from [issue #2](https://github.com/wyim-pgl/MV-SAM3D/issues/2).
@@ -24,7 +26,9 @@ This example uses the photos from [issue #2](https://github.com/wyim-pgl/MV-SAM3
 
 **Multi-view** means observing a scene from several viewpoints; **multi-object** means reconstructing multiple objects within the scene separately. This example uses both. To reconstruct each bearing as an independent object, each one needs its own mask folder and a consistent ID across views.
 
-> **Current status:** SAM 3 model access is pending. The validated results use **SAM 1 with manually specified boxes on the original three views**. The newly requested SAM 3 run uses **only original views 0 and 2, with seven visible bearings**, and **has not run**. The results below are not an automatic SAM 3 or grounding result, nor a validated two-view result.
+> **Latest result:** [SAM 3 text-only segmentation and two-view reconstruction](SAM3-Two-View-Walkthrough) are now verified. Original views `0.png` and `2.png` each yielded one cup and seven bearing masks without clicks or boxes. Both objects completed reconstruction and pose optimization. Ground contact and physical volumes remain separate, unverified steps.
+
+The results below describe the earlier **three-view SAM 1 box-prompted experiment**. The new walkthrough includes separate SAM 3 inputs, commands, and results.
 
 > The issue #2 photos were successfully processed on an RTX 4090 (24 GB). After generating masks using SAM 1 with manually specified boxes, DA3 and the default multi-object inference produced and rendered a **GLB containing two meshes: the cup and the bearing group**. The out-of-memory issue in the existing GPU pose optimization was also fixed. With that fix, **pose optimization succeeded for both the cup and the bearings**, and the optimized GLB was verified to contain two meshes. See [results and limitations](Running).
 
