@@ -90,7 +90,7 @@ data/issue2_cup_bearings/
 - Filename: match the corresponding photograph
 - Dimensions and position: retain the full original canvas; do not crop to the object
 
-The loader treats `alpha > 0` as foreground. Plain RGB images or grayscale masks can cause the entire image to be treated as foreground. Check the actual alpha channel rather than assuming a background is transparent.
+The loader treats `alpha > 0` as foreground and rejects masks without an RGBA alpha channel. It also rejects mismatched image/mask dimensions, unreadable files, and missing requested views instead of silently reconstructing a partial subset. Check the actual alpha channel rather than assuming a background is transparent.
 
 ### Option A: manually edited RGBA masks
 
@@ -122,7 +122,21 @@ python preprocessing/build_mvsam3d_dataset.py \
 
 When `--prompts` is omitted, object names become the text prompts. When `--counts` is omitted, selection defaults to one instance per object. Specify both for the bearing-group example. Review the masks even when their counts match.
 
-The updated selector unions the highest-scoring requested number of nonempty, distinct masks and preserves disconnected regions. It rejects insufficient detections and requires every view to succeed before a scene is ready. `segmentation_report.json` records per-view candidate counts, selected counts, and scores. Use fresh output directories: a failed view invalidates its old mask, but an initialization failure can leave earlier files on disk. A new run invalidates the old success report, and any failed report must block reconstruction.
+The selector unions the highest-scoring requested number of nonempty, distinct masks and preserves disconnected regions. It rejects insufficient detections and requires every view to succeed before a scene is ready. Only positive fixed counts are supported; there is no select-all mode, and `0` or a missing count must not be used to request one.
+
+`segmentation_report.json` records each view's filename, prompt, threshold, candidate count, selected indices/count/scores, and dropped candidates with reasons (`empty`, `duplicate`, or `count_limit`). Count failures retain their diagnostics. Candidate count is unknown if inference fails before producing detections.
+
+Use fresh output directories. A failed view invalidates its old mask, but an initialization failure can leave earlier files on disk. A new run invalidates the old success report. The reconstruction loader rejects failed, malformed, or incomplete reports even when some mask files remain. Explicit view subsets are supported only from a successful report; automatic loading must match all reported views. Legacy RGBA datasets without a report still load, but cannot reveal a view whose image and mask are both absent.
+
+Object names must be simple directory names, not paths or reserved names such as `images`. Before writing, preprocessing checks all object destinations for source-image aliases, including existing symlinks and hardlinks. Do not mix loose original photographs with an already-organized dataset; use a separate derived directory instead. These checks do not protect against another process changing filesystem links during a run.
+
+### Group-mask regression evidence
+
+![Synthetic disconnected, touching, partially overlapping, and missing-instance export cases](assets/group-mask-regression.png)
+
+These are **synthetic processor outputs, not SAM model predictions**. The tests exercise the actual selector, RGBA exporter, reports, and loader. The first three panels preserve both selected regions; the incomplete case produces no usable mask. Duplicate and empty detections are tested separately. Run `python -m pytest tests/test_sam3_mask_selection.py tests/test_group_mask_boundary.py -q` in the reconstruction environment.
+
+The existing [real two-view overlays](assets/issue2-sam3-masks.jpg) were also inspected. Their bearing unions contain two and one connected regions because masks touch, although the selection report records seven detections per view. Neither connected-component counts nor these regression tests verify seven physical 3D instances, automatic cross-view identities, or segmentation accuracy on new photographs.
 
 The SAM 1 `sam_segmenter.py` CLI is not text-based and does not provide this count-aware multi-object workflow. The earlier SAM 1 experiment used a separate script with manually specified boxes.
 

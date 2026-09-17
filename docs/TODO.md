@@ -98,14 +98,14 @@ Group mode is the current two-view SAM 3 path. It uses one generated bearing-gro
 
 Files: extend `preprocessing/sam3_segmenter.py`, `preprocessing/build_mvsam3d_dataset.py`, and `tests/test_sam3_mask_selection.py`.
 
-- [ ] Test several spatially separated objects described by the same text prompt.
-- [ ] Preserve every selected mask region when taking the union. Do not keep only the largest connected component.
-- [ ] Verify that empty masks are excluded and duplicate detections are suppressed without removing nearby, distinct objects.
-- [ ] When a target count is supplied, select at most that many distinct candidates and fail if fewer are available; never fabricate missing instances.
-- [ ] Record candidate count, selected count, selected scores, prompt, threshold, filename, and dropped-candidate information for each view.
-- [ ] Keep a view with missing/occluded instances marked incomplete. Do not silently reuse an old mask or treat a partial scene as ready for reconstruction.
-- [ ] Keep an optional select-all mode separate from fixed-count mode; do not overload zero or a missing count with an undocumented meaning.
-- [ ] Test and visually inspect disconnected objects, touching objects, partial occlusion, duplicate detections, and missing detections.
+- [x] Test spatially separated candidates for the same prompt through the real selector/exporter using synthetic processor outputs. Model accuracy on new separated-object photographs is not established.
+- [x] Preserve every selected mask region when taking the union. Do not keep only the largest connected component.
+- [x] Verify that empty masks are excluded and duplicate detections are suppressed without removing nearby, distinct objects in the regression fixtures.
+- [x] When a target count is supplied, select at most that many distinct candidates and fail if fewer are available; never fabricate missing instances.
+- [x] Record candidate count, selected count, selected scores, prompt, threshold, filename, and dropped-candidate information for each view. Candidate count remains unknown if inference fails before returning detections.
+- [x] Keep a view with missing/occluded instances marked incomplete. Remove stale failed-view masks; reject incomplete or malformed reports and missing views at the reconstruction loader. Image organization also fails on unreadable inputs or failed writes.
+- [x] Keep fixed-count semantics explicit. Select-all is unsupported; zero/None/bool are not aliases for it. Omitted CLI counts retain the documented default of one.
+- [x] Test disconnected, touching, partially overlapping, duplicate, and missing candidates; visually inspect synthetic export panels and existing real two-view overlays. Synthetic tests are not a fresh SAM accuracy/occlusion experiment.
 
 ### Task B2: Add separate instance outputs only when identities are defined
 
@@ -119,14 +119,30 @@ Files: extend `preprocessing/sam3_segmenter.py`, `preprocessing/build_mvsam3d_da
 
 ## C. End-to-end checks and documentation
 
-- [ ] Keep original and derived datasets in different directories; rerun DA3 whenever the selected images change.
-- [ ] Confirm all masks remain pixel-aligned with their original photographs.
+- [x] Keep the validated original and derived datasets in different directories. The derived two-view DA3 file lists exactly original views 0 and 2 (verified again on 2026-09-17); do not reuse the three-view result. Rerun DA3 when image contents or the reference frame changes.
+- [x] Confirm the four existing two-view SAM 3 masks remain pixel-aligned with their original photographs (2026-09-17 archive, dimension, binary-alpha, and foreground-RGB checks; future generated masks require the same validation).
 - [x] Treat ground-plane alignment as a separate postprocessing constraint. Shared final export now enforces group contact; it is not implied by pose optimization or volume calibration.
 - [x] Add an English Wiki section with exact commands, units, assumptions, and failure examples.
 - [ ] Add a real calibrated physical-volume example once a measured reference and verified modeled count are provided.
-- [ ] Include mask overlays that visibly show all disconnected instances.
+- [x] Include a clearly labeled synthetic disconnected-region export overlay in the English data-preparation guide, alongside the existing real-scene overlay. Neither is evidence of verified cross-view physical identities.
 - [x] Run regression tests and a small real-scene check; retain evidence locally. The full suite passed 54 tests; real-scene inspection is uncalibrated because no measured reference value has been supplied.
 - [x] Commit completed, verified grounding and volume code/tests/docs. Keep incomplete drafts and large GLBs outside the commit; do not push.
+
+## Power-outage recovery (2026-09-17)
+
+- Repository integrity checked at `f576be9`; existing outputs and the completed review under `artifacts/review-f576be9/` were preserved. No interrupted local inference process was found.
+- Implemented: B1 export/selection regressions, source-image protection, per-view selection diagnostics, and rejection of incomplete preprocessing inputs at reconstruction loading (`903d8c7`). Review follow-up fixes cover corrupt loose images, duplicate report view identities, and canonical filenames ending in `_mask` (`0546c76`).
+- Implemented: G02 hardlink/symlink alias preflight and atomic grounding reports (`3c75ace`), preserving canonical mesh and DA3 inputs before any finalization mutation.
+- Existing two-view assets were checked without recomputation: both ZIPs pass CRC checks; views 0 and 2 are byte-identical to the source archive; all four masks match image dimensions, have binary alpha, and retain source RGB on foreground pixels. Local evidence: `artifacts/power-recovery/existing-mask-checks.json`.
+- The existing bearing overlays were visually inspected. Their unions contain two and one connected regions respectively because detections touch. This is not evidence of seven reconstructed physical instances or a widely separated-instance test.
+- Blocked: the real physical-volume example still requires measured single-bearing volume and a verified modeled reference count/common scale. The current reference has six connected shells, five with negative signed volume; shell counts cannot establish physical identities.
+- B2 remains conditional on defined, verified cross-view identities and a need for individual reconstructions. No automatic IDs or unseen masks will be fabricated from score order, image order, or connected components.
+- The prior session's explicit instruction to implement review fixes was recovered. Immediate recovery work prioritizes B1 and input-preservation findings E01/E02/G02; other review findings remain open, not silently marked fixed.
+- The remote `mvsam3d` environment is available. Fresh final snapshot verification at `0546c76`: **120 passed, zero skipped**, with `POSE_CUDA_STRESS=1`; 27 existing dependency/Pillow deprecation warnings remain. Logs: `artifacts/power-recovery/final-tests.log`. The dirty remote historical checkout is preserved; all tests ran from isolated temporary snapshots.
+- Independent review approved G02 and, after the three regression fixes, B1. Reports: `artifacts/power-recovery/b1-review.md` and `b1-rereview.md`.
+- Existing real SAM 1 and SAM 3 archive datasets passed the final stricter loader in a temporary directory. Seven preserved GLB containers passed header/chunk/JSON checks and retained their original SHA-256 hashes. No reconstruction was rerun.
+- Fresh SAM accuracy tests on new separated/occluded-object photographs remain unavailable; only synthetic export behavior and the preserved real two-view masks were verified. Do not treat the B1 completion as a new model-quality result.
+- No whole-dataset/model recomputation, model-architecture changes, push, or Wiki publication is part of this recovery batch.
 
 ## Recommended order
 
