@@ -279,6 +279,69 @@ def test_complete_report_loads_and_unrelated_object_is_rejected(modules, tmp_pat
         loader.load_images_and_masks_from_path(tmp_path, 'other')
 
 
+@pytest.mark.parametrize('failure', ['corrupt', 'write_false', 'write_error'])
+def test_loose_organization_failure_blocks_models(modules, tmp_path, monkeypatch, failure):
+    sam, loader = modules
+    Image.new('RGB', (8, 8)).save(tmp_path / '0.png')
+    Image.new('RGB', (8, 8)).save(tmp_path / '1.png')
+    if failure == 'corrupt':
+        (tmp_path / '1.png').write_bytes(b'broken')
+    originals = {p: p.read_bytes() for p in tmp_path.glob('*.png')}
+    monkeypatch.syspath_prepend(str(ROOT / 'preprocessing'))
+    monkeypatch.setitem(sys.modules, 'sam3_segmenter', sam)
+    build = load_module('group_build', ROOT / 'preprocessing/build_mvsam3d_dataset.py')
+    if failure != 'corrupt':
+        import cv2
+        def failed_write(*args):
+            if failure == 'write_error':
+                raise cv2.error('simulated write failure')
+            return False
+        monkeypatch.setattr(cv2, 'imwrite', failed_write)
+    calls = []
+    obj = segmenter(sam, [output(candidates())] * 2)
+    monkeypatch.setattr(build, 'SAM3MultiObjectSegmenter',
+                        lambda **kw: calls.append('SAM') or obj)
+    monkeypatch.setattr(build, 'run_da3', lambda *args: calls.append('DA3') or True)
+    result = build.process_scene(tmp_path, ['bearings'], counts={'bearings': 2}, run_da3_flag=True)
+    saved = json.loads((tmp_path / 'segmentation_report.json').read_text())
+    assert not result['success'] and not saved['success']
+    assert saved['steps']['organize']['success'] is False
+    assert saved['steps']['organize']['error']
+    assert calls == []
+    assert all(p.read_bytes() == data for p, data in originals.items())
+    with pytest.raises(ValueError, match='report'):
+        loader.load_images_and_masks_from_path(tmp_path, 'bearings', ['0'])
+
+
+@pytest.mark.parametrize('duplicate', ['0.png', '0.jpg'])
+def test_duplicate_report_view_identities_rejected(modules, tmp_path, duplicate):
+    sam, loader = modules
+    images = scene(tmp_path, 1)
+    result = segmenter(sam, [output(candidates())]).segment_object_multiview(
+        images, 'bearings', 'bearing', tmp_path, 2)
+    result['views'].append(dict(result['views'][0], image=duplicate))
+    result['total_views'] = result['success_views'] = 2
+    (tmp_path / 'segmentation_report.json').write_text(json.dumps(
+        {'success': True, 'steps': {'segmentation': [result]}}, default=str))
+    for names in (None, ['0']):
+        with pytest.raises(ValueError, match='report'):
+            loader.load_images_and_masks_from_path(tmp_path, 'bearings', names)
+
+
+@pytest.mark.parametrize('suffix', ['', '_mask'])
+def test_split_source_mask_suffix_loads_auto_and_explicit(modules, tmp_path, suffix):
+    sam, loader = modules
+    images = scene(tmp_path, 1)
+    (images / '0.png').rename(images / 'view_mask.png')
+    result = segmenter(sam, [output(candidates())]).segment_object_multiview(
+        images, 'bearings', 'bearing', tmp_path, 2)
+    assert result['success']
+    if suffix:
+        (tmp_path / 'bearings/view_mask.png').rename(tmp_path / 'bearings/view_mask_mask.png')
+    for names in (None, ['view_mask']):
+        assert loader.load_images_and_masks_from_path(tmp_path, 'bearings', names)[2] == ['view_mask']
+
+
 def test_scene_persists_mixed_failure_and_skips_da3(modules, tmp_path, monkeypatch):
     sam, loader = modules
     scene(tmp_path)

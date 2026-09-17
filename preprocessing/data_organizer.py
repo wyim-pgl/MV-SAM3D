@@ -63,12 +63,15 @@ def organize_images(scene_dir: Path) -> Dict:
         output_path = images_dir / f"{i}.png"
         
         # 读取并保存为 PNG
-        img = cv2.imread(str(img_path))
-        if img is None:
-            logger.warning(f"  Failed to read: {img_path}")
-            continue
-        
-        cv2.imwrite(str(output_path), img)
+        try:
+            img = cv2.imread(str(img_path))
+            if img is None:
+                raise OSError(f"Failed to read: {img_path}")
+            if not cv2.imwrite(str(output_path), img):
+                raise OSError(f"Failed to write: {output_path}")
+        except (OSError, cv2.error) as exc:
+            logger.error(f"  Organization failed: {exc}")
+            return {'success': False, 'num_images': i, 'error': str(exc)}
         logger.info(f"  {img_path.name} → {output_path.name}")
     
     logger.success(f"✓ Organized {len(image_files)} images to {images_dir}")

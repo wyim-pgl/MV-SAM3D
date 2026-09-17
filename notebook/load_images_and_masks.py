@@ -37,6 +37,8 @@ def validate_segmentation_report(directory: Path, mask_prompt=None):
                            or v.get('selected_count') != entry['expected_count']
                            for v in entry['views'])):
                 raise ValueError('incomplete segmentation results')
+            if len({Path(v['image']).stem for v in entry['views']}) != len(entry['views']):
+                raise ValueError('duplicate segmentation view identities')
         if mask_prompt is not None and not any(e['object_name'] == mask_prompt for e in entries):
             raise ValueError(f'no segmentation result for {mask_prompt}')
         return {Path(v['image']).stem for e in entries
@@ -299,8 +301,11 @@ def load_images_and_masks_from_path(
         if image_names is None:
             image_files = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
             mask_files = list(masks_dir.glob('*.png')) + list(masks_dir.glob('*.jpg'))
-            mask_names = {f.stem[:-5] if f.stem.endswith('_mask') else f.stem for f in mask_files}
-            if mask_names - {f.stem for f in image_files}:
+            source_names = {f.stem for f in image_files}
+            mask_names = {f.stem if f.stem in source_names else
+                          f.stem[:-5] if f.stem.endswith('_mask') else f.stem
+                          for f in mask_files}
+            if mask_names - source_names:
                 raise FileNotFoundError('Mask files have no matching source image')
             
             # Sort with natural number ordering (consistent with DA3 script)
