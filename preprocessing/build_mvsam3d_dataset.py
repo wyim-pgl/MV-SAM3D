@@ -24,7 +24,9 @@ from loguru import logger
 
 # 导入本地模块
 from data_organizer import organize_images
-from sam3_segmenter import SAM3MultiObjectSegmenter
+from sam3_segmenter import (
+    SAM3MultiObjectSegmenter, preflight_mask_outputs, reject_source_aliases,
+)
 
 
 def run_da3(scene_dir: Path) -> bool:
@@ -108,8 +110,25 @@ def process_scene(
         'steps': {},
     }
     
-    # Invalidate any earlier successful report before starting a new run.
+    # Check every destination for every object before even invalidating the report.
+    # Include original loose images and existing organized images in alias checks.
+    images_dir = scene_dir / 'images'
+    originals = [p for p in scene_dir.iterdir()
+                 if p.suffix.lower() in {'.png', '.jpg', '.jpeg'} and p.is_file()]
+    existing = list(images_dir.glob('*.png')) + list(images_dir.glob('*.jpg'))
+    sources = originals + existing
+    planned = [images_dir / f'{i}.png' for i in range(len(originals))] if originals else existing
+    if originals:
+        reject_source_aliases(planned, sources)
     report_path = scene_dir / 'segmentation_report.json'
+    reject_source_aliases([report_path], sources)
+    if not objects:
+        raise ValueError('At least one object is required')
+    for obj_name in objects:
+        mask_dir = preflight_mask_outputs(planned, scene_dir, obj_name)
+        reject_source_aliases([mask_dir / f'{p.stem}.png' for p in planned], sources)
+
+    # Invalidate any earlier successful report before starting a new run.
     report_path.write_text(json.dumps(result, indent=2))
 
     # Step 1: 数据组织
@@ -150,13 +169,16 @@ def process_scene(
             prompt = obj_name
         
         # 分割
-        seg_result = segmenter.segment_object_multiview(
-            images_dir=images_dir,
-            object_name=obj_name,
-            text_prompt=prompt,
-            output_dir=scene_dir,
-            expected_count=counts.get(obj_name, 1) if counts else 1,
-        )
+        try:
+            seg_result = segmenter.segment_object_multiview(
+                images_dir=images_dir,
+                object_name=obj_name,
+                text_prompt=prompt,
+                output_dir=scene_dir,
+                expected_count=counts.get(obj_name, 1) if counts else 1,
+            )
+        except Exception as exc:
+            seg_result = {'object_name': obj_name, 'success': False, 'error': str(exc)}
         seg_results.append(seg_result)
     
     result['steps']['segmentation'] = seg_results

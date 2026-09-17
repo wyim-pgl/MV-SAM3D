@@ -11,27 +11,69 @@ from PIL import Image
 from loguru import logger
 
 
-def select_instance_indices(masks, scores, expected_count, iou_threshold=0.5):
-    """Select distinct, nonempty instances by score; never pad missing objects."""
-    if not isinstance(expected_count, (int, np.integer)) or expected_count < 1:
+def select_instance_indices(masks, scores, expected_count, iou_threshold=0.5, report=None):
+    """Fixed-count selection; optional diagnostics survive insufficient detections.
+
+    Select-all is intentionally unsupported: None, zero and bool are not counts.
+    """
+    if isinstance(expected_count, (bool, np.bool_)) or not isinstance(expected_count, (int, np.integer)) or expected_count < 1:
         raise ValueError("Expected count must be a positive integer")
     masks = np.asarray(masks, dtype=bool)
     scores = np.asarray(scores)
     if masks.ndim != 3 or scores.shape != (len(masks),) or not np.isfinite(scores).all():
         raise ValueError("Expected masks (N,H,W) and finite scores (N,)")
-    selected = []
+    selected, dropped = [], []
     for index in np.argsort(-scores, kind='stable'):
+        index = int(index)
         candidate = masks[index]
         if not candidate.any():
+            reason = 'empty'
+        elif any(np.logical_and(candidate, masks[j]).sum() /
+                 np.logical_or(candidate, masks[j]).sum() > iou_threshold
+                 for j in selected):
+            reason = 'duplicate'
+        elif len(selected) == expected_count:
+            reason = 'count_limit'
+        else:
+            selected.append(index)
             continue
-        if any(np.logical_and(candidate, masks[j]).sum() /
-               np.logical_or(candidate, masks[j]).sum() > iou_threshold
-               for j in selected):
-            continue
-        selected.append(int(index))
-        if len(selected) == expected_count:
-            return selected
-    raise ValueError(f"Expected {expected_count} distinct instances, found {len(selected)}")
+        dropped.append({'index': index, 'score': float(scores[index]), 'reason': reason})
+    if report is not None:
+        report.update(candidate_count=len(scores), selected_count=len(selected),
+                      selected_indices=selected, scores=scores[selected].tolist(),
+                      dropped_candidates=dropped)
+    if len(selected) != expected_count:
+        raise ValueError(f"Expected {expected_count} distinct instances, found {len(selected)}")
+    return selected
+
+
+def validate_object_name(object_name):
+    """Object outputs must be a simple, nonreserved directory name."""
+    if (not isinstance(object_name, str) or not object_name.strip()
+            or object_name != object_name.strip() or object_name in {'.', '..'}
+            or any(c in object_name for c in '/\\\\:\x00')
+            or object_name.casefold() in {'images', 'segmentation_report.json'}):
+        raise ValueError(f"Unsafe or reserved object name: {object_name!r}")
+
+
+def reject_source_aliases(destinations, sources):
+    """Preflight the complete batch before writing or removing any output."""
+    for destination in destinations:
+        for source in sources:
+            if (destination.resolve() == source.resolve()
+                    or (destination.exists() and source.exists() and destination.samefile(source))):
+                raise ValueError(f"Output aliases source image: {destination} -> {source}")
+
+
+def preflight_mask_outputs(image_files, output_dir, object_name):
+    validate_object_name(object_name)
+    mask_dir = output_dir / object_name
+    reject_source_aliases([mask_dir], {p.parent for p in image_files})
+    destinations = [mask_dir / f'{p.stem}.png' for p in image_files]
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("Source image stems must be unique for mask export")
+    reject_source_aliases(destinations, image_files)
+    return mask_dir
 
 
 class SAM3MultiObjectSegmenter:
@@ -131,13 +173,13 @@ class SAM3MultiObjectSegmenter:
             list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg")),
             key=natural_sort_key
         )
+        mask_dir = preflight_mask_outputs(image_files, output_dir, object_name)
         if not image_files:
             return {'success': False, 'error': 'No images found'}
         
         logger.info(f"  Processing {len(image_files)} views...")
         
         # 创建物体的 mask 目录
-        mask_dir = output_dir / object_name
         mask_dir.mkdir(parents=True, exist_ok=True)
         
         # 对每个视角进行分割
@@ -146,6 +188,12 @@ class SAM3MultiObjectSegmenter:
         view_reports = []
         
         for i, img_path in enumerate(image_files):
+            view_report = {'image': img_path.name, 'text_prompt': text_prompt,
+                           'confidence_threshold': self.confidence_threshold,
+                           'expected_count': expected_count, 'candidate_count': None,
+                           'selected_count': 0, 'selected_indices': [], 'scores': [],
+                           'dropped_candidates': [], 'success': False}
+            view_reports.append(view_report)
             try:
                 # 读取图像
                 image = Image.open(img_path).convert('RGB')
@@ -164,9 +212,9 @@ class SAM3MultiObjectSegmenter:
                 masks_np = masks.detach().cpu().numpy() if torch.is_tensor(masks) else np.asarray(masks)
                 scores_np = scores.float().detach().cpu().numpy() if torch.is_tensor(scores) else np.asarray(scores)
                 masks_np = masks_np[:, 0]  # SAM 3 returns (N,1,H,W).
-                selected = select_instance_indices(masks_np, scores_np, expected_count)
+                view_report['candidate_count'] = len(scores_np)
+                selected = select_instance_indices(masks_np, scores_np, expected_count, report=view_report)
                 mask_np = np.logical_or.reduce(masks_np[selected])
-                selected_scores = scores_np[selected].tolist()
                 
                 # 确保 mask 和原图尺寸一致
                 if mask_np.shape != (image.size[1], image.size[0]):
@@ -195,9 +243,7 @@ class SAM3MultiObjectSegmenter:
                 # 计算 mask 面积（使用 alpha 通道）
                 area_ratio = np.sum(rgba_mask[:, :, 3] > 0) / (rgba_mask.shape[0] * rgba_mask.shape[1])
                 
-                view_reports.append({'image': img_path.name, 'candidate_count': len(scores_np),
-                                     'selected_count': len(selected), 'scores': selected_scores,
-                                     'area_ratio': float(area_ratio)})
+                view_report.update(success=True, area_ratio=float(area_ratio))
                 logger.info(f"  View {i}: ✓ (instances={len(selected)}, area={area_ratio*100:.1f}%)")
                 success_count += 1
                 
@@ -208,7 +254,7 @@ class SAM3MultiObjectSegmenter:
                 import traceback
                 traceback.print_exc()
                 failed_views.append(i)
-                view_reports.append({'image': img_path.name, 'error': str(e)})
+                view_report['error'] = str(e)
         
         # 总结
         logger.info(f"  Result: {success_count}/{len(image_files)} views segmented")

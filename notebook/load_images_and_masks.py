@@ -4,11 +4,45 @@ Supports two data structures:
 1. mask_prompt=None: All images and masks in the same directory, naming format: xxxx.png and xxxx_mask.png
 2. mask_prompt!=None: Images in input_path/images/, masks in input_path/{mask_prompt}/
 """
+import json
 from pathlib import Path
 from typing import List, Optional, Tuple
 import numpy as np
 from PIL import Image
 from loguru import logger
+
+
+def validate_segmentation_report(directory: Path, mask_prompt=None):
+    """Legacy data needs no report; a present report must prove a complete run."""
+    path = directory / 'segmentation_report.json'
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        report = json.loads(path.read_text())
+        if not isinstance(report, dict) or report.get('success') is not True:
+            raise ValueError('preprocessing did not succeed')
+        entries = report['steps']['segmentation']
+        if not isinstance(entries, list) or not entries:
+            raise ValueError('missing segmentation results')
+        for entry in entries:
+            if (not isinstance(entry, dict) or entry.get('success') is not True
+                    or not isinstance(entry.get('object_name'), str)
+                    or entry.get('failed_views') != []
+                    or not isinstance(entry.get('views'), list) or not entry['views']
+                    or entry.get('total_views') != len(entry['views'])
+                    or entry.get('success_views') != len(entry['views'])
+                    or type(entry.get('expected_count')) is not int or entry['expected_count'] < 1
+                    or any(not isinstance(v, dict) or not isinstance(v.get('image'), str)
+                           or 'error' in v or v.get('success', True) is not True
+                           or v.get('selected_count') != entry['expected_count']
+                           for v in entry['views'])):
+                raise ValueError('incomplete segmentation results')
+        if mask_prompt is not None and not any(e['object_name'] == mask_prompt for e in entries):
+            raise ValueError(f'no segmentation result for {mask_prompt}')
+        return {Path(v['image']).stem for e in entries
+                if mask_prompt is None or e['object_name'] == mask_prompt for v in e['views']}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"Invalid or failed preprocessing report {path}: {exc}") from exc
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -32,12 +66,8 @@ def load_mask_from_rgba(path: Path) -> np.ndarray:
     
     if img.mode == 'RGBA' and img_array.ndim == 3 and img_array.shape[2] >= 4:
         mask = img_array[..., 3] > 0
-    elif img.mode == 'RGB':
-        logger.warning(f"Mask file {path} is RGB format, not RGBA. Using all pixels as mask.")
-        mask = np.ones((img_array.shape[0], img_array.shape[1]), dtype=bool)
     else:
-        logger.warning(f"Unexpected image mode {img.mode} for mask file {path}")
-        mask = np.ones((img_array.shape[0], img_array.shape[1]), dtype=bool)
+        raise ValueError(f"Mask file must have an RGBA alpha channel: {path} ({img.mode})")
     
     return mask
 
@@ -67,6 +97,8 @@ def load_images_and_masks(
         masks: List of masks (numpy arrays, bool format)
         loaded_names: List of image names that were successfully loaded
     """
+    report_names = validate_segmentation_report(images_and_masks_dir)
+    auto_detect = image_names is None
     if not images_and_masks_dir.exists():
         raise FileNotFoundError(f"Directory does not exist: {images_and_masks_dir}")
     
@@ -75,7 +107,10 @@ def load_images_and_masks(
     
     if image_names is None:
         image_files = list(images_and_masks_dir.glob("*.png")) + list(images_and_masks_dir.glob("*.jpg"))
-        image_files = [f for f in image_files if "_mask" not in f.name]
+        mask_names = {f.stem[:-5] for f in image_files if f.stem.endswith('_mask')}
+        image_files = [f for f in image_files if not f.stem.endswith('_mask')]
+        if mask_names - {f.stem for f in image_files}:
+            raise FileNotFoundError('Mask files have no matching source image')
         
         # Sort with natural number ordering (consistent with DA3 script)
         # This ensures "2.png" comes before "10.png" (numeric, not lexicographic)
@@ -90,6 +125,9 @@ def load_images_and_masks(
         image_names = [f.stem for f in image_files]
         logger.info(f"Auto-detected {len(image_names)} images: {image_names}")
     
+    if report_names is not None and (set(image_names) - report_names
+                                    or (auto_detect and set(image_names) != report_names)):
+        raise ValueError('Image views do not match preprocessing report')
     images = []
     masks = []
     loaded_names = []
@@ -118,16 +156,15 @@ def load_images_and_masks(
                 break
         
         if image_path is None:
-            logger.warning(f"Image file not found for '{image_name}', skipping")
-            continue
-        
+            raise FileNotFoundError(f"Image file not found for '{image_name}'")
         if mask_path is None:
-            logger.warning(f"Mask file not found for '{image_name}', skipping")
-            continue
+            raise FileNotFoundError(f"Mask file not found for '{image_name}'")
         
         try:
             image = load_image(image_path)
             mask = load_mask_from_rgba(mask_path)
+            if mask.shape != image.shape[:2]:
+                raise ValueError(f"Mask size mismatch for '{image_name}': {mask.shape} vs {image.shape[:2]}")
             
             images.append(image)
             masks.append(mask)
@@ -136,8 +173,7 @@ def load_images_and_masks(
             logger.info(f"Loaded '{image_name}': image={image.shape}, mask={mask.shape}")
             
         except Exception as e:
-            logger.error(f"Failed to load '{image_name}': {e}")
-            continue
+            raise ValueError(f"Failed to load '{image_name}': {e}") from e
     
     if len(images) == 0:
         raise ValueError(f"No valid images and masks found in {images_and_masks_dir}")
@@ -243,6 +279,8 @@ def load_images_and_masks_from_path(
     if not input_path.is_dir():
         raise ValueError(f"Input path is not a directory: {input_path}")
     
+    report_names = validate_segmentation_report(input_path, mask_prompt)
+    auto_detect = image_names is None
     if mask_prompt is None:
         logger.info(f"Loading from single directory: {input_path}")
         return load_images_and_masks(input_path, image_names=image_names)
@@ -260,6 +298,10 @@ def load_images_and_masks_from_path(
         
         if image_names is None:
             image_files = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
+            mask_files = list(masks_dir.glob('*.png')) + list(masks_dir.glob('*.jpg'))
+            mask_names = {f.stem[:-5] if f.stem.endswith('_mask') else f.stem for f in mask_files}
+            if mask_names - {f.stem for f in image_files}:
+                raise FileNotFoundError('Mask files have no matching source image')
             
             # Sort with natural number ordering (consistent with DA3 script)
             # This ensures "2.png" comes before "10.png" (numeric, not lexicographic)
@@ -274,6 +316,9 @@ def load_images_and_masks_from_path(
             image_names = [f.stem for f in image_files]
             logger.info(f"Auto-detected {len(image_names)} images: {image_names}")
         
+        if report_names is not None and (set(image_names) - report_names
+                                        or (auto_detect and set(image_names) != report_names)):
+            raise ValueError('Image views do not match preprocessing report')
         images = []
         masks = []
         loaded_names = []
@@ -304,16 +349,15 @@ def load_images_and_masks_from_path(
                     break
             
             if image_path is None:
-                logger.warning(f"Image file not found for '{image_name}', skipping")
-                continue
-            
+                raise FileNotFoundError(f"Image file not found for '{image_name}'")
             if mask_path is None:
-                logger.warning(f"Mask file not found for '{image_name}', skipping")
-                continue
+                raise FileNotFoundError(f"Mask file not found for '{image_name}'")
             
             try:
                 image = load_image(image_path)
                 mask = load_mask_from_rgba(mask_path)
+                if mask.shape != image.shape[:2]:
+                    raise ValueError(f"Mask size mismatch for '{image_name}': {mask.shape} vs {image.shape[:2]}")
                 
                 images.append(image)
                 masks.append(mask)
@@ -322,8 +366,7 @@ def load_images_and_masks_from_path(
                 logger.info(f"Loaded '{image_name}': image={image.shape}, mask={mask.shape}")
                 
             except Exception as e:
-                logger.error(f"Failed to load '{image_name}': {e}")
-                continue
+                raise ValueError(f"Failed to load '{image_name}': {e}") from e
         
         if len(images) == 0:
             raise ValueError(f"No valid images and masks found in {input_path}")
