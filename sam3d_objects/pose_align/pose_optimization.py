@@ -13,6 +13,7 @@ Key features:
 import numpy as np
 import torch
 import torch.nn.functional as F
+from pytorch3d.ops import knn_points
 from pytorch3d.transforms import quaternion_to_matrix
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
@@ -397,7 +398,7 @@ class PoseOptimizer:
     
     def compute_loss(self) -> Tuple[torch.Tensor, float]:
         """
-        Compute Chamfer Distance loss with batching to avoid OOM.
+        Compute unsquared, one-sided Chamfer loss without pairwise matrices.
         
         Returns:
             total_loss: Loss value for backprop
@@ -405,22 +406,16 @@ class PoseOptimizer:
         """
         source_aligned = self.transform_to_aligned_space()
         
-        # One-sided CD: target → source (with batching)
-        batch_size = 5000
-        num_batches = (len(self.target_points) + batch_size - 1) // batch_size
-        
-        all_min_dists = []
-        for i in range(num_batches):
-            start = i * batch_size
-            end = min((i + 1) * batch_size, len(self.target_points))
-            target_batch = self.target_points[start:end]
-            
-            dists = torch.cdist(target_batch, source_aligned)
-            min_dists, _ = torch.min(dists, dim=1)
-            all_min_dists.append(min_dists)
-        
-        all_min_dists = torch.cat(all_min_dists)
-        cd_loss = all_min_dists.mean()
+        # Chunked cdist still retains every N x M matrix for backward. KNN
+        # stores only nearest indices; differentiate the selected Euclidean
+        # distances to preserve the original (unsquared) target -> source loss.
+        with torch.no_grad():
+            nearest = knn_points(
+                self.target_points.unsqueeze(0), source_aligned.unsqueeze(0), K=1
+            ).idx[0, :, 0]
+        cd_loss = torch.linalg.vector_norm(
+            self.target_points - source_aligned[nearest], dim=1
+        ).mean()
         
         # Regularization to prevent large deviations
         quat_reg = 0.001 * (self.quat - self.initial_quat).pow(2).sum()
@@ -455,7 +450,8 @@ class PoseOptimizer:
             history: Dictionary with optimization history
         """
         # Adaptive learning rate based on initial CD
-        initial_loss, initial_cd = self.compute_loss()
+        with torch.no_grad():
+            _, initial_cd = self.compute_loss()
         logger.info(f"  Initial CD: {initial_cd:.6f}")
         
         # If initial CD is very small, use smaller learning rates
