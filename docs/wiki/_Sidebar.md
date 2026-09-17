@@ -1,12 +1,12 @@
 ## MV-SAM3D
 
-- [프로젝트 소개](Home)
-- [설치 및 환경 설정](Installation)
-- [데이터 준비](Data-Preparation)
-- [실행 방법: 이슈 #2 multi-object](Running)
-- [모델 구조](Model-Architecture)
+- [Project Introduction](Home)
+- [Installation and Setup](Installation)
+- [Data Preparation](Data-Preparation)
+- [Running: Issue #2 Multi-Object Example](Running)
+- [Model Architecture](Model-Architecture)
 
 ---
 
-- [GitHub 저장소](https://github.com/wyim-pgl/MV-SAM3D)
-- [예제 사진: 이슈 #2](https://github.com/wyim-pgl/MV-SAM3D/issues/2)
+- [GitHub Repository](https://github.com/wyim-pgl/MV-SAM3D)
+- [Example Photos: Issue #2](https://github.com/wyim-pgl/MV-SAM3D/issues/2)

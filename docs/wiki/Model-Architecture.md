@@ -1,96 +1,98 @@
-# 모델 구조
+# Model Architecture
 
-[소개](Home) · [실행 방법](Running)
+[Home](Home) · [Running](Running)
 
-## 1. 전체 구성
+## 1. Overview
 
 ```text
-RGB 사진 ────────────────┬─────────────────────────────┐
+RGB photos ─────────────┬─────────────────────────────┐
                         │                             │
-               객체별 RGBA 마스크                Depth Anything 3
-             (수동 편집 또는 SAM 3)             깊이·카메라·포인트맵
+              Per-object RGBA masks            Depth Anything 3
+           (manual editing or SAM 3)        Depth, cameras, point maps
                         │                             │
                         └──────────────┬──────────────┘
                                        │
-                      객체마다 SAM 3D Objects 기반 생성
+                   Per-object generation with SAM 3D Objects
                                        │
-                     Stage 1: Sparse Structure 생성
-                       여러 시점의 정보를 가중 융합
+                      Stage 1: Sparse Structure generation
+                         Weighted fusion across views
                                        │
-                     Stage 2: Structured Latent 생성
-                       여러 시점의 정보를 가중 융합
+                     Stage 2: Structured Latent generation
+                         Weighted fusion across views
                                        │
-                            Mesh / Gaussian 디코딩
+                            Mesh / Gaussian decoding
                                        │
-                      DA3 좌표계 정렬·선택적 pose 최적화
+                   DA3 alignment and optional pose optimization
                                        │
-                               다중 객체 장면 병합
+                              Multi-object scene merge
 ```
 
-SAM 3는 **2D 마스크를 만드는 선택적 전처리 모델**, SAM 3D Objects는 **3D 생성 모델**입니다. 이름이 비슷하지만 서로 바꿔 쓸 수 없습니다.
+SAM 3 is an **optional preprocessing model for producing 2D masks**; SAM 3D Objects is a **3D generation model**. Despite their similar names, they are not interchangeable.
 
-## 2. 두 단계 생성
+> **Current status:** SAM 3 model access is pending. The validated results use SAM 1 with manually specified boxes on the original three views. The requested SAM 3 run using only original views 0 and 2 (seven visible bearings) has not run. The diagram describes the available workflow, not evidence of a completed SAM 3 run.
+
+## 2. Two-Stage Generation
 
 ### Stage 1 — Sparse Structure
 
-사진과 마스크 등의 조건을 바탕으로 객체가 차지하는 3D 공간의 희소 구조를 생성합니다. 다중 시점에서는 시점별 정보를 융합해 구조를 추정합니다.
+This stage generates the sparse structure of the 3D space occupied by an object, conditioned on inputs such as photos and masks. With multiple views, it fuses per-view information to estimate the structure.
 
 ### Stage 2 — Structured Latent (SLAT)
 
-Stage 1의 구조를 바탕으로 형상·외관 정보를 담는 latent를 생성합니다. 이후 디코더가 mesh 또는 Gaussian 표현으로 변환합니다.
+Using the structure from Stage 1, this stage generates latents containing geometry and appearance information. Decoders then convert them into a mesh or Gaussian representation.
 
-- Mesh: GLB로 저장, 일반적인 3D 편집기에서 열기
-- Gaussian: PLY로 저장, Gaussian splat 지원 뷰어에서 확인
+- Mesh: saved as GLB; open in a standard 3D editor
+- Gaussian: saved as PLY; inspect in a viewer that supports Gaussian splats
 
-PLY를 일반 삼각형 mesh로 해석해서는 안 됩니다. 기본 `--decode_formats`는 `gaussian,mesh`이며, 다중 객체 GLB 병합에는 mesh 출력이 필요합니다.
+Do not interpret the PLY output as a conventional triangle mesh. The default `--decode_formats` is `gaussian,mesh`, and merging multiple objects into a GLB requires mesh output.
 
-## 3. 다중 시점 가중 융합
+## 3. Weighted Multi-View Fusion
 
-단순히 사진별 결과 mesh를 평균내는 방식이 아닙니다. 생성 과정에서 시점별 정보를 latent 단위로 가중 융합합니다.
+This method does not simply average the meshes produced from individual photos. It performs weighted fusion of per-view information at the latent level during generation.
 
-1. **Warmup:** 단순 평균을 사용하는 첫 스텝으로 attention을 수집합니다.
-2. **가중치 계산:** attention entropy 등을 바탕으로 시점별 가중치를 만듭니다. 낮은 entropy는 해당 구현에서 높은 신뢰도 신호로 사용되며, 실제 정확도를 보장하는 값은 아닙니다.
-3. **본 생성:** 계산한 가중치를 사용해 처음부터 생성 과정을 수행합니다.
+1. **Warmup:** Collect attention during an initial step that uses simple averaging.
+2. **Weight calculation:** Compute per-view weights using signals such as attention entropy. Lower entropy is treated as a higher-confidence signal in this implementation, not as a guarantee of actual accuracy.
+3. **Main generation:** Run the generation process from the beginning using the computed weights.
 
-CLI 기본값:
+CLI defaults:
 
-| 항목 | 기본값 |
-|---|---|
-| Stage 1 weighting | 활성화 |
-| Stage 1 entropy alpha | `30.0` |
-| Stage 2 weighting | 활성화 |
+| Setting               | Default   |
+| --------------------- | --------- |
+| Stage 1 weighting     | Enabled   |
+| Stage 1 entropy alpha | `30.0`    |
+| Stage 2 weighting     | Enabled   |
 | Stage 2 weight source | `entropy` |
-| Stage 2 entropy alpha | `30.0` |
+| Stage 2 entropy alpha | `30.0`    |
 
-Stage 2는 `visibility`, `mixed` 방식도 지원합니다. 가시성 기반 처리는 깊이·카메라 정보를 필요로 합니다. 처음에는 기본 entropy 설정을 사용하세요. 한 시점만 입력하면 다중 시점 가중 융합 대신 단일 시점 경로를 사용합니다.
+Stage 2 also supports `visibility` and `mixed` modes. Visibility-based processing requires depth and camera information. Start with the default entropy settings. A single input view uses the single-view path rather than weighted multi-view fusion.
 
-## 4. Multi-object는 어떻게 처리하는가?
+## 4. How Are Multiple Objects Processed?
 
-`--mask_prompt red_cup,ball_bearings`를 주면 CLI가 쉼표로 구분된 폴더 이름을 읽고 다중 객체 모드로 진입합니다.
+With `--mask_prompt red_cup,ball_bearings`, the CLI reads the comma-separated folder names and enters multi-object mode.
 
-1. 같은 사진에서 `red_cup/` 마스크를 사용해 컵을 생성합니다.
-2. 같은 사진에서 `ball_bearings/` 마스크를 사용해 구슬 그룹을 생성합니다.
-3. 객체별 pose와 DA3 정보를 이용해 공통 좌표계로 배치합니다.
-4. 요청한 경우 객체별 pose를 최적화합니다.
-5. 객체 mesh를 하나의 장면으로 내보냅니다.
+1. Generate the cup using the `red_cup/` masks from the photos.
+2. Generate the bearing group using the `ball_bearings/` masks from the same photos.
+3. Place the objects in a shared coordinate system using their poses and DA3 information.
+4. Optimize each object's pose if requested.
+5. Export the object meshes as one scene.
 
-객체별 생성은 순차적이며, 물체 간 충돌이나 물리적 접촉을 보장하는 공동 생성·물리 시뮬레이션은 아닙니다. Pose 최적화는 DA3 포인트클라우드에 대한 정렬입니다. 기본적으로 회전·이동을 최적화하고, `--pose_opt_optimize_scale`을 켜야 스케일도 조정합니다.
+Objects are generated sequentially. This is not joint generation or a physics simulation that guarantees collision handling or physical contact between objects. Pose optimization aligns objects to the DA3 point cloud. It optimizes rotation and translation by default; scale is adjusted only when `--pose_opt_optimize_scale` is enabled.
 
-## 5. 저 VRAM 모드
+## 5. Low-VRAM Mode
 
-`--low_vram`은 모델 가중치를 CPU 메모리에 두고 필요한 단계에 GPU로 이동시켜 GPU 메모리 사용량을 줄입니다. 다른 모델로 교체하는 옵션은 아니며 CPU RAM과 데이터 이동 비용이 필요합니다. 이 모드에서는 모델 compilation을 비활성화합니다.
+`--low_vram` keeps model weights in CPU memory and moves them to the GPU for the stages that need them, reducing GPU memory usage. It does not substitute a different model, and it requires CPU RAM and incurs data-transfer overhead. Model compilation is disabled in this mode.
 
-## 6. 코드 탐색 지도
+## 6. Code Navigation
 
-링크는 Wiki 작성 시 확인한 커밋을 가리킵니다.
+These links point to the commit checked when this Wiki was written.
 
-| 파일 | 역할 |
-|---|---|
-| [run_inference_weighted.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/run_inference_weighted.py) | CLI, 가중 추론, 객체 순차 처리, 결과 병합 |
-| [scripts/run_da3.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/scripts/run_da3.py) | DA3 깊이·카메라 및 장면 출력 |
-| [preprocessing/sam3_segmenter.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/preprocessing/sam3_segmenter.py) | 텍스트 기반 마스크 후보 선택 및 RGBA 저장 |
-| [notebook/load_images_and_masks.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/notebook/load_images_and_masks.py) | 사진과 alpha 마스크 로딩 |
-| [sam3d_objects/pipeline/inference_pipeline.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pipeline/inference_pipeline.py) | 2단계 생성·디코딩, 저 VRAM 관리 |
-| [sam3d_objects/pipeline/multi_view_weighted.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pipeline/multi_view_weighted.py) | attention 수집 및 가중 융합 |
-| [sam3d_objects/utils/latent_weighting.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/utils/latent_weighting.py) | entropy·visibility 가중치 계산 |
-| [sam3d_objects/pose_align/pose_optimization.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pose_align/pose_optimization.py) | 마스크 기반 포인트 추출 및 객체 정렬 |
+| File                                                                                                                                                                              | Role |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| [run_inference_weighted.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/run_inference_weighted.py)                                         | CLI, weighted inference, sequential object processing, and result merging |
+| [scripts/run_da3.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/scripts/run_da3.py)                                                       | DA3 depth, camera, and scene output |
+| [preprocessing/sam3_segmenter.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/preprocessing/sam3_segmenter.py)                             | Text-based mask candidate selection and RGBA saving |
+| [notebook/load_images_and_masks.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/notebook/load_images_and_masks.py)                         | Photo and alpha-mask loading |
+| [sam3d_objects/pipeline/inference_pipeline.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pipeline/inference_pipeline.py)   | Two-stage generation and decoding, low-VRAM management |
+| [sam3d_objects/pipeline/multi_view_weighted.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pipeline/multi_view_weighted.py) | Attention collection and weighted fusion |
+| [sam3d_objects/utils/latent_weighting.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/utils/latent_weighting.py)             | Entropy and visibility weight calculation |
+| [sam3d_objects/pose_align/pose_optimization.py](https://github.com/wyim-pgl/MV-SAM3D/blob/f6085368ff52a8dbf7267e3acceef7fb19a31047/sam3d_objects/pose_align/pose_optimization.py) | Mask-based point extraction and object alignment |
