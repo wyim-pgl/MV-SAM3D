@@ -86,4 +86,4 @@ Actual GPU runs on the issue #2 seven-bearing scene exercised basic single-view 
 
 The [earlier one-off grounded export](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table) used scene-specific table samples and individual PCA rotations. It remains a separate historical record, not the algorithm used by the current default.
 
-Grounding does not certify 3D instance count, semantic floor identity, exact image reprojection, real-world units, physical volume, or cup capacity. Physical-volume estimation and reference calibration are not implemented yet. Large GLBs and model weights are not committed.
+Grounding does not certify 3D instance count, semantic floor identity, exact image reprojection, real-world units, physical volume, or cup capacity. The [reference-volume tool](Volume-Calibration) now implements geometric volume estimation, but a measured physical reference and a verified modeled reference count are still required. It does not establish cup capacity or measurement accuracy. Large GLBs and model weights are not committed.

@@ -1,0 +1,44 @@
+[
+  {
+    "node": "object_0_red_cup",
+    "geometry": "object_0_red_cup",
+    "status": "valid",
+    "reason": null,
+    "raw_signed_volume_scene_units3": 0.0007596658913293688,
+    "checks": {
+      "finite_coordinates": true,
+      "nonempty": true,
+      "nondegenerate": true,
+      "watertight": true,
+      "winding_consistent": true,
+      "world_transform_determinant": 1.0,
+      "invertible_world_transform": true,
+      "connected_shell_count": 48,
+      "negative_signed_volume_shell_count": 47
+    },
+    "warnings": [
+      "Negative-signed-volume shells exist: they may represent cavities or incorrect orientation; nesting is not verified."
+    ]
+  },
+  {
+    "node": "object_1_ball_bearings",
+    "geometry": "object_1_ball_bearings",
+    "status": "valid",
+    "reason": null,
+    "raw_signed_volume_scene_units3": 7.1674734011284195e-06,
+    "checks": {
+      "finite_coordinates": true,
+      "nonempty": true,
+      "nondegenerate": true,
+      "watertight": true,
+      "winding_consistent": true,
+      "world_transform_determinant": 1.0,
+      "invertible_world_transform": true,
+      "connected_shell_count": 6,
+      "negative_signed_volume_shell_count": 5
+    },
+    "warnings": [
+      "Negative-signed-volume shells exist: they may represent cavities or incorrect orientation; nesting is not verified."
+    ]
+  }
+]

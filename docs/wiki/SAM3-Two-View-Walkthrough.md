@@ -222,7 +222,7 @@ Full model checkpoints, large GLBs, and raw execution logs are not committed. Th
 - Seven selected bearing masks do not certify seven accurate, separately measurable 3D bearings.
 - Group masks can preserve disconnected regions. Persistent per-instance IDs across views are separate planned work.
 - Pose optimization itself does not enforce a flat floor. The separate postprocessing step below verifies floor contact for the cup and bearing-group meshes; it does not certify contact for every individual bearing surface.
-- Reference-volume calibration and cup-capacity measurement are not implemented by this workflow. See `docs/TODO.md` in the repository for the planned volume and disconnected-instance tasks.
+- [Reference-volume calibration](Volume-Calibration) is available as a separate CPU tool. It requires a measured reference and verified modeled count; it does not measure cup capacity. See `docs/TODO.md` for completed and remaining volume/instance tasks.
 - These are local, verified changes. No GitHub push has been performed.
 
 ## 10. Align the reconstructed objects to the photographed table

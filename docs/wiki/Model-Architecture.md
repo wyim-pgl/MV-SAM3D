@@ -29,7 +29,7 @@ RGB photos ─────────────┬─────────
 
 SAM 3 is an **optional preprocessing model for producing 2D masks**; SAM 3D Objects is a **3D generation model**. Despite their similar names, they are not interchangeable.
 
-> Both mask paths have been exercised: the earlier three-view SAM 1 box-prompted experiment and the [two-view SAM 3 text-only workflow](SAM3-Two-View-Walkthrough). The latter selects one cup and seven distinct bearing masks per image and unions the bearings into a group mask. Separate instance reconstruction and physical-volume calibration remain planned work.
+> Both mask paths have been exercised: the earlier three-view SAM 1 box-prompted experiment and the [two-view SAM 3 text-only workflow](SAM3-Two-View-Walkthrough). The latter selects one cup and seven distinct bearing masks per image and unions the bearings into a group mask. Separate instance reconstruction remains planned work. A [reference-volume calculation tool](Volume-Calibration) is available, but physical calibration of this scene still requires measured inputs and verification of its reconstructed reference geometry.
 
 ## 2. Two-Stage Generation
 

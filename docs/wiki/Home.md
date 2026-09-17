@@ -15,6 +15,8 @@ This repository is a fork of [devinli123/MV-SAM3D](https://github.com/devinli123
 
 Latest step-by-step example: [SAM 3: two views, no clicks or boxes](SAM3-Two-View-Walkthrough).
 
+Measurement tool: [reference-volume calibration](Volume-Calibration), with mesh checks and explicit assumptions. A physical reference value is required; no physical volumes have been measured for the example yet.
+
 ## This Example: Red Cup + Ball Bearings
 
 This example uses the photos from [issue #2](https://github.com/wyim-pgl/MV-SAM3D/issues/2).

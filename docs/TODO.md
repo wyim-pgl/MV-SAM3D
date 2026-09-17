@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-This is a plan, not a claim that volume calibration or instance tracking has been implemented. Preserve original images, masks, and meshes. Keep documentation in English. Commit verified changes locally; do not push without approval.
+This checklist records planned work and verified implementation status. The reference-volume calculation tool is implemented and tested; physical calibration of the example remains pending measured inputs and reference-geometry verification. Persistent instance tracking is not implemented. Preserve original images, masks, and meshes. Keep documentation in English. Commit verified changes locally; do not push without approval.
 
 The immediate work has two independently testable parts:
 
@@ -18,14 +18,15 @@ The immediate work has two independently testable parts:
 - [x] Add score-based mask selection, duplicate suppression, and failure on insufficient detections.
 - [x] Generate the two-view DA3 scene and reconstruct both objects with pose optimization.
 - [x] Load and render the optimized GLB; verify that it contains two object meshes.
+- [x] Apply shared default grounding across single-object, multi-object, batch, and the Python export example; verify final group contact and preserve canonical intermediates.
 - [ ] Verify that the generated bearing mesh actually represents seven physical bearings. Seven selected 2D masks do not prove seven correct 3D instances.
-- [ ] Validate reconstructed mesh volumes. No physical volume or cup capacity has been measured yet.
+- [x] Inspect raw reconstructed mesh volumes and structural validity, including negative-shell warnings. No physical volume or cup capacity has been measured yet.
 
 ## A. Reference-volume calibration
 
 ### Inputs and formulas
 
-Planned command interface (not yet available):
+Implemented command interface (the values below are illustrative):
 
 ```text
 python scripts/measure_scene_volumes.py
@@ -52,34 +53,34 @@ These formulas assume a common, uniform physical scale and a geometrically faith
 
 Files: create `scripts/measure_scene_volumes.py` and `tests/test_scene_volumes.py`.
 
-- [ ] Enumerate scene graph instances by exact node name, not only the shared geometry dictionary.
-- [ ] Apply each instance's complete world transform to a copy of its geometry before computing volume. Include scale; never mutate shared geometry in place.
-- [ ] Require finite coordinates, nonempty vertices/faces, nondegenerate geometry, watertightness, consistent winding, and positive finite signed volume for the reference.
-- [ ] Reject an invalid reference with a clear error. Do not silently take absolute volume, cap holes, or repair normals.
-- [ ] Report invalid nonreference objects as unavailable with the reason; continue reporting valid objects.
-- [ ] Preserve explicit geometry identifiers. Do not count floor geometry or camera markers as physical objects automatically.
-- [ ] Warn that watertightness is not proof of correct volume: nested shells, overlapping components, self-intersections, and reconstruction errors need separate review.
+- [x] Enumerate scene graph instances by exact node name, not only the shared geometry dictionary.
+- [x] Apply each instance's complete world transform to a copy of its geometry before computing volume. Include scale; never mutate shared geometry in place.
+- [x] Require finite coordinates, nonempty vertices/faces, nondegenerate geometry, watertightness, consistent winding, and positive finite signed volume for the reference.
+- [x] Reject an invalid reference with a clear error. Do not silently take absolute volume, cap holes, or repair normals.
+- [x] Report invalid nonreference objects as unavailable with the reason; continue reporting valid objects.
+- [x] Preserve explicit geometry identifiers. Do not count floor geometry or camera markers as physical objects automatically.
+- [x] Warn that watertightness is not proof of correct volume: nested shells, overlapping components, self-intersections, and reconstruction errors need separate review.
 
 ### Task A2: Compute and report calibrated volumes
 
-- [ ] Validate positive finite reference volume, a positive integer count, and an unambiguous existing reference node.
-- [ ] Record that reference-count correctness is an input assumption, not an inferred property of connected components.
-- [ ] Compute the volume factor and linear scale using the formulas above.
-- [ ] Report raw world-space volumes, calibrated mm³ and mL, mesh checks, reference inputs, and limitations in JSON.
-- [ ] Mark results as estimates, not certified measurements.
-- [ ] State that an enclosed mesh/material volume is **not automatically cup liquid capacity or mass**. Capacity requires a separately defined interior region and fill level; mass requires material density.
-- [ ] Refuse to overwrite the input scene. Make scaled scene export a separate opt-in follow-up, not a hidden side effect.
+- [x] Validate positive finite reference volume, a positive integer count, and an unambiguous existing reference node.
+- [x] Record that reference-count correctness is an input assumption, not an inferred property of connected components.
+- [x] Compute the volume factor and linear scale using the formulas above.
+- [x] Report raw world-space volumes, calibrated mm³ and mL, mesh checks, reference inputs, and limitations in JSON.
+- [x] Mark results as estimates, not certified measurements.
+- [x] State that an enclosed mesh/material volume is **not automatically cup liquid capacity or mass**. Capacity requires a separately defined interior region and fill level; mass requires material density.
+- [x] Refuse to overwrite the input scene. Make scaled scene export a separate opt-in follow-up, not a hidden side effect.
 
 ### Task A3: Test the calculation before using reconstructed objects
 
-- [ ] First write failing tests for the new behavior, then implement the smallest calculation that passes.
-- [ ] Analytic ratio test: modeled reference volume 2, per-bearing volume 100 mm³, count 7, and another modeled volume 3 must yield factor 350 and 1,050 mm³ (1.05 mL).
-- [ ] Instance-transform test: a unit-volume box scaled by 2 in all axes must contribute volume 8. Two instances of shared geometry with different transforms must be measured independently.
-- [ ] Reject zero, negative, NaN, and infinite physical inputs, noninteger counts, missing reference nodes, and open/degenerate reference meshes.
-- [ ] Verify that an invalid nonreference mesh is reported as unavailable rather than assigned a fabricated number.
-- [ ] Check the original scene and source geometry remain unchanged.
-- [ ] Run `python -m pytest tests/test_scene_volumes.py -q` in the existing reconstruction environment.
-- [ ] Only after analytic tests pass, inspect the actual two-view SAM 3 GLB and report whether its meshes qualify for volume estimation.
+- [x] First write failing tests for the new behavior, then implement the smallest calculation that passes.
+- [x] Analytic ratio test: modeled reference volume 2, per-bearing volume 100 mm³, count 7, and another modeled volume 3 must yield factor 350 and 1,050 mm³ (1.05 mL).
+- [x] Instance-transform test: a unit-volume box scaled by 2 in all axes must contribute volume 8. Two instances of shared geometry with different transforms must be measured independently.
+- [x] Reject zero, negative, NaN, and infinite physical inputs, noninteger counts, missing reference nodes, and open/degenerate reference meshes.
+- [x] Verify that an invalid nonreference mesh is reported as unavailable rather than assigned a fabricated number.
+- [x] Check the original scene and source geometry remain unchanged.
+- [x] Run `python -m pytest tests/test_scene_volumes.py -q` in the existing reconstruction environment.
+- [x] Only after analytic tests pass, inspect the actual two-view SAM 3 GLB and report whether its meshes qualify for volume estimation.
 - [ ] Obtain the measured single-bearing volume and confirm the modeled bearing count before reporting a physical result.
 
 ## B. Multiple disconnected instances of the same category
@@ -120,11 +121,12 @@ Files: extend `preprocessing/sam3_segmenter.py`, `preprocessing/build_mvsam3d_da
 
 - [ ] Keep original and derived datasets in different directories; rerun DA3 whenever the selected images change.
 - [ ] Confirm all masks remain pixel-aligned with their original photographs.
-- [ ] Treat ground-plane alignment as a separate postprocessing constraint. It is not implied by pose optimization or volume calibration.
-- [ ] Add an English Wiki section with exact commands, units, assumptions, failure examples, and a real validated volume example once a measured reference is provided.
+- [x] Treat ground-plane alignment as a separate postprocessing constraint. Shared final export now enforces group contact; it is not implied by pose optimization or volume calibration.
+- [x] Add an English Wiki section with exact commands, units, assumptions, and failure examples.
+- [ ] Add a real calibrated physical-volume example once a measured reference and verified modeled count are provided.
 - [ ] Include mask overlays that visibly show all disconnected instances.
-- [ ] Run regression tests and a small real-scene check; retain evidence locally.
-- [ ] Commit only completed, verified code/tests/docs. Keep incomplete drafts and large GLBs outside the commit; do not push.
+- [x] Run regression tests and a small real-scene check; retain evidence locally. The full suite passed 54 tests; real-scene inspection is uncalibrated because no measured reference value has been supplied.
+- [x] Commit completed, verified grounding and volume code/tests/docs. Keep incomplete drafts and large GLBs outside the commit; do not push.
 
 ## Recommended order
 
