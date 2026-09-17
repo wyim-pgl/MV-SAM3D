@@ -5,7 +5,9 @@ Final GLBs use glTF Y-up (Blender's standard importer maps this to Z-up).
 """
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import trimesh
@@ -149,12 +151,27 @@ def _sha256(path):
     return digest.hexdigest()
 
 
+def _write_report(path, report):
+    """Replace the manifest without following an existing symlink or hardlink."""
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         dir=path.parent, prefix='.grounding-',
+                                         suffix='.tmp', delete=False) as stream:
+            temp = Path(stream.name)
+            json.dump(report, stream, indent=2)
+        os.replace(temp, path)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
 def invalidate_grounded_output(output_dir):
     """Start a new run without reusing previous successful finals."""
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / 'grounding.json').write_text(json.dumps(
-        {'version': 1, 'status': 'incomplete', 'reason': 'New reconstruction started; final grounding has not completed'}, indent=2))
+    _write_report(directory / 'grounding.json',
+                  {'version': 1, 'status': 'incomplete', 'reason': 'New reconstruction started; final grounding has not completed'})
     for name in ('result_grounded.glb', 'result_grounded_with_floor.glb',
                  'result_grounded.tmp.glb', 'result_grounded_with_floor.tmp.glb'):
         (directory / name).unlink(missing_ok=True)
@@ -201,12 +218,22 @@ def finalize_grounded_outputs(object_paths, da3_output_path, output_dir, ground_
     if da3_output_path is not None:
         protected.extend([Path(da3_output_path).resolve(), (Path(da3_output_path).parent/'scene.glb').resolve()])
     targets = (final_path, floor_path, report_path, final_path.with_suffix('.tmp.glb'), floor_path.with_suffix('.tmp.glb'))
-    if any(p.resolve() in protected for p in targets):
-        raise GroundingError('Grounding output must not overwrite an input scene')
+    # Check every write/delete destination before invalidation touches anything.
+    # Resolved names catch symlinks (even dangling ones); samefile catches hardlinks.
+    for target in targets:
+        for source in protected:
+            aliases_input = target.resolve() == source
+            if not aliases_input:
+                try:
+                    aliases_input = target.samefile(source)
+                except FileNotFoundError:
+                    pass
+            if aliases_input:
+                raise GroundingError('Grounding output must not overwrite an input scene')
     invalidate_grounded_output(output_dir)
     report = {'version': 1, 'status': 'running', 'coordinate_system': 'glTF Y-up; Blender imports as Z-up',
               'canonical_outputs': ['result.glb', 'result.ply'], 'objects': {}}
-    report_path.write_text(json.dumps(report, indent=2))
+    _write_report(report_path, report)
     # These are derived filenames owned by this exporter, never input files.
     for p in (final_path, floor_path):
         p.unlink(missing_ok=True)
@@ -280,12 +307,12 @@ def finalize_grounded_outputs(object_paths, da3_output_path, output_dir, ground_
         report['final_outputs'] = [final_path.name, floor_path.name]
         report['files'] = {p.name: {'bytes': p.stat().st_size, 'sha256': _sha256(p)}
                            for p in (final_path, floor_path)}
-        report_path.write_text(json.dumps(report, indent=2))
+        _write_report(report_path, report)
         return {'grounded_glb_path': final_path, 'grounded_floor_glb_path': floor_path,
                 'grounding_report_path': report_path}
     except Exception as exc:
         for p in (final_path, floor_path, final_path.with_suffix('.tmp.glb'), floor_path.with_suffix('.tmp.glb')):
             p.unlink(missing_ok=True)
         report.update(status='failed', error=str(exc))
-        report_path.write_text(json.dumps(report, indent=2))
+        _write_report(report_path, report)
         raise

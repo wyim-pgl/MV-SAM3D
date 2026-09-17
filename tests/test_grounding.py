@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 import trimesh
@@ -147,6 +148,69 @@ class GroundingTests(unittest.TestCase):
         self.grounding.invalidate_grounded_output(output)
         self.assertFalse(self.grounding.is_grounded_output(output))
         self.assertFalse((output/'result_grounded.glb').exists())
+
+    def test_all_output_aliases_are_rejected_before_any_mutation(self):
+        names = ('grounding.json', 'result_grounded.glb',
+                 'result_grounded_with_floor.glb', 'result_grounded.tmp.glb',
+                 'result_grounded_with_floor.tmp.glb')
+        sources = [*self.paths.values(), self.da3/'da3_output.npz', self.da3/'scene.glb']
+        for link_kind in ('hardlink', 'symlink'):
+            for source in sources:
+                for name in names:
+                    with self.subTest(link=link_kind, source=source.name, target=name):
+                        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+                            output = Path(directory)
+                            # Separate sources keep even the broken implementation's
+                            # destructive behavior contained within this case.
+                            protected = {}
+                            for i, original in enumerate(sources):
+                                copy = output / ('scene.glb' if original.name == 'scene.glb' else f'input{i}{original.suffix}')
+                                copy.write_bytes(original.read_bytes())
+                                protected[original] = copy
+                            target = output/name
+                            if link_kind == 'hardlink':
+                                target.hardlink_to(protected[source])
+                            else:
+                                target.symlink_to(protected[source])
+                            before = {p: p.read_bytes() for p in output.iterdir()}
+                            with self.assertRaisesRegex(ValueError, 'overwrite an input'):
+                                self.grounding.finalize_grounded_outputs(
+                                    {k: protected[p] for k, p in self.paths.items()},
+                                    protected[self.da3/'da3_output.npz'], output,
+                                    ground_plane=[0, 1, 0, 0])
+                            self.assertEqual({p: p.read_bytes() for p in output.iterdir()}, before)
+                            self.assertTrue(target.samefile(protected[source]))
+
+    def test_standalone_invalidation_preserves_linked_report_referent(self):
+        for link_kind in ('hardlink', 'symlink'):
+            with self.subTest(link=link_kind):
+                output = self.root/link_kind
+                output.mkdir()
+                source = output/'canonical.glb'
+                original = self.paths['cup'].read_bytes()
+                source.write_bytes(original)
+                report = output/'grounding.json'
+                if link_kind == 'hardlink':
+                    report.hardlink_to(source)
+                else:
+                    report.symlink_to(source)
+                self.grounding.invalidate_grounded_output(output)
+                self.assertEqual(source.read_bytes(), original)
+                self.assertFalse(report.samefile(source))
+                self.assertEqual(json.loads(report.read_text())['status'], 'incomplete')
+                self.assertEqual(set(output.iterdir()), {source, report})
+
+    def test_report_replace_failure_preserves_old_report_and_cleans_temp(self):
+        output = self.root/'output'
+        output.mkdir()
+        report = output/'grounding.json'
+        report.write_text('{"version": 1, "status": "incomplete"}')
+        original = report.read_bytes()
+        with mock.patch('os.replace', side_effect=OSError('replace failed')):
+            with self.assertRaisesRegex(OSError, 'replace failed'):
+                self.grounding.invalidate_grounded_output(output)
+        self.assertEqual(report.read_bytes(), original)
+        self.assertEqual(list(output.iterdir()), [report])
 
     def test_input_cannot_be_overwritten_by_output(self):
         output = self.root/'output'
