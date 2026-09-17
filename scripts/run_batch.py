@@ -11,7 +11,7 @@ Scenes are directories laid out the way run_inference_weighted.py expects:
     data/<scene>/<object>/*.png     RGBA, alpha = foreground
 
     python scripts/run_batch.py --data ./data --mask_prompt object --low_vram
-    python scripts/run_batch.py --data ./data --scenes 1124 1125 --da3_root ./da3_outputs
+    python scripts/run_batch.py --data ./data --scenes 1124 1125 --da3_dir ./da3_outputs
 """
 import argparse
 import sys
@@ -32,13 +32,16 @@ def main():
                     help="scene directory names; default is every scene under --data")
     ap.add_argument("--mask_prompt", default="object")
     ap.add_argument("--da3_dir", type=Path, default=REPO / "da3_outputs",
-                    help="looked up per scene as <da3_dir>/<scene>/da3_output.npz; "
-                         "a scene without one falls back to the built-in depth model")
+                    help="required per scene: <da3_dir>/<scene>/da3_output.npz "
+                         "and companion aligned scene.glb")
+    ap.add_argument("--ground_plane", nargs=4, type=float, default=None,
+                    metavar=("NX", "NY", "NZ", "D"),
+                    help="Ground plane in aligned DA3 coordinates; estimated if omitted")
     ap.add_argument("--model_tag", default="hf")
     ap.add_argument("--low_vram", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--skip_done", action="store_true",
-                    help="skip scenes that already have a result under visualization/")
+                    help="skip scenes with successful grounded finals for this mask under visualization/")
     args = ap.parse_args()
 
     if args.low_vram:
@@ -46,8 +49,9 @@ def main():
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     from loguru import logger
-    from inference import Inference
-    from run_inference_weighted import run_weighted_inference
+    from sam3d_objects.pose_align.grounding import (
+        validate_grounding_inputs, is_grounded_output,
+    )
 
     scenes = args.scenes or sorted(
         p.name for p in args.data.iterdir() if (p / "images").is_dir())
@@ -56,9 +60,22 @@ def main():
 
     if args.skip_done:
         keep = [s for s in scenes
-                if not list((REPO / "visualization" / s).glob("*/*/result.glb"))]
+                if not any(is_grounded_output(run_dir) for run_dir in
+                           (REPO / "visualization" / s / args.mask_prompt).glob("*"))]
         logger.info(f"skip_done: {len(scenes) - len(keep)} already reconstructed")
         scenes = keep
+
+    if not scenes:
+        return 0
+
+    for scene in scenes:
+        try:
+            validate_grounding_inputs(args.da3_dir / scene / "da3_output.npz")
+        except Exception as exc:
+            raise ValueError(f"Scene {scene}: required DA3 grounding inputs are invalid: {exc}") from exc
+
+    from inference import Inference
+    from run_inference_weighted import run_weighted_inference
 
     config_path = REPO / "checkpoints" / args.model_tag / "pipeline.yaml"
     if not config_path.exists():
@@ -71,18 +88,20 @@ def main():
     ok, failed = [], []
     for i, scene in enumerate(scenes, 1):
         npz = args.da3_dir / scene / "da3_output.npz"
-        logger.info(f"[{i}/{len(scenes)}] {scene}"
-                    f"{'' if npz.exists() else '  (no DA3 pointmap, using depth model)'}")
+        logger.info(f"[{i}/{len(scenes)}] {scene}")
         t = time.time()
         try:
-            run_weighted_inference(
+            result = run_weighted_inference(
                 input_path=args.data / scene,
                 mask_prompt=args.mask_prompt,
                 seed=args.seed,
                 low_vram=args.low_vram,
                 inference=inference,
-                da3_output_path=str(npz) if npz.exists() else None,
+                da3_output_path=str(npz),
+                ground_plane=args.ground_plane,
             )
+            if not result or not is_grounded_output(result["output_dir"]):
+                raise RuntimeError(f"Scene {scene}: grounded final outputs were not completed")
         except Exception:
             traceback.print_exc()
             failed.append(scene)

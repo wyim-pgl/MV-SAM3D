@@ -1,19 +1,21 @@
 """
 SAM 3D Objects Inference Script
-Supports both single-view and multi-view 3D reconstruction
+Supports both single-view and multi-view 3D reconstruction.
+All commands require a DA3 NPZ and its companion aligned scene.glb. result.glb/result.ply are canonical intermediates; the final
+scenes are result_grounded.glb and result_grounded_with_floor.glb.
 
 Usage:
     # Multi-view inference (mask_prompt=None, images and masks in same directory, use all images)
-    python run_inference.py --input_path ./data/images_and_masks
+    python run_inference.py --input_path ./data/images_and_masks --da3_output ./da3/da3_output.npz
     
     # Single-view inference (specify a single image name)
-    python run_inference.py --input_path ./data/images_and_masks --image_names image1
+    python run_inference.py --input_path ./data/images_and_masks --image_names image1 --da3_output ./da3/da3_output.npz
     
     # Multi-view inference (mask_prompt!=None, images in images/, masks in specified folder)
-    python run_inference.py --input_path ./data --mask_prompt stuffed_toy
+    python run_inference.py --input_path ./data --mask_prompt stuffed_toy --da3_output ./da3/da3_output.npz
     
     # Specify multiple image names (can be any filename without extension)
-    python run_inference.py --input_path ./data --mask_prompt stuffed_toy --image_names image1,view_a,2
+    python run_inference.py --input_path ./data --mask_prompt stuffed_toy --image_names image1,view_a,2 --da3_output ./da3/da3_output.npz
 """
 import sys
 import argparse
@@ -21,11 +23,7 @@ from pathlib import Path
 from typing import List, Optional
 from loguru import logger
 
-# 导入推理代码
-sys.path.append("notebook")
-from inference import Inference
-from load_images_and_masks import load_images_and_masks_from_path
-from sam3d_objects.utils.cross_attention_logger import CrossAttentionLogger
+sys.path.append(str(Path(__file__).resolve().parent / "notebook"))
 
 
 def parse_image_names(image_names_str: Optional[str]) -> Optional[List[str]]:
@@ -140,6 +138,9 @@ def run_inference(
     attention_stage: Optional[str] = None,
     attention_layers: Optional[List[int]] = None,
     save_coords: bool = False,
+    da3_output_path=None,
+    ground_plane=None,
+    low_vram: bool = False,
 ):
     """
     Run inference
@@ -158,13 +159,31 @@ def run_inference(
         attention_stage: Stage selector ('ss', 'slat', or 'both')
         attention_layers: Layer indices to record (supports negative indices)
         save_coords: Whether to save 3D spatial coordinates in SLAT attention files
+        da3_output_path: Required DA3 NPZ with companion aligned scene.glb
+        ground_plane: Optional plane [nx, ny, nz, d] in aligned DA3 coordinates
+        low_vram: Offload idle models to reduce GPU memory use
+
+    Returns:
+        Paths to the grounded final scene, floor variant, and grounding report.
+        result.glb and result.ply remain canonical intermediate artifacts.
     """
+    from sam3d_objects.pose_align.grounding import (
+        validate_grounding_inputs, load_da3_pointmaps, finalize_grounded_outputs,
+        invalidate_grounded_output,
+    )
+
+    decode_formats = decode_formats or ["gaussian", "mesh"]
+    da3_path = validate_grounding_inputs(da3_output_path, decode_formats)
     config_path = f"checkpoints/{model_tag}/pipeline.yaml"
     if not Path(config_path).exists():
         raise FileNotFoundError(f"Model config file not found: {config_path}")
     
+    from inference import Inference
+    from load_images_and_masks import load_images_and_masks_from_path
+    from sam3d_objects.utils.cross_attention_logger import CrossAttentionLogger
+
     logger.info(f"Loading model: {config_path}")
-    inference = Inference(config_path, compile=False)
+    inference = Inference(config_path, compile=False, low_vram=low_vram)
     
     if hasattr(inference._pipeline, 'rendering_engine'):
         if inference._pipeline.rendering_engine != "pytorch3d":
@@ -183,11 +202,13 @@ def run_inference(
         image_names=image_names,
     )
     
+    view_pointmaps = load_da3_pointmaps(da3_path, loaded_image_names)
     num_views = len(view_images)
     logger.info(f"Successfully loaded {num_views} views: {loaded_image_names}")
     
     is_single_view = num_views == 1
     output_dir = get_output_dir(input_path, mask_prompt, image_names, is_single_view)
+    invalidate_grounded_output(output_dir)
     
     # 将日志写入输出目录中的 inference.log，方便后续分析
     log_file = output_dir / "inference.log"
@@ -216,11 +237,14 @@ def run_inference(
 
     if is_single_view:
         logger.info("Single-view inference mode")
+        import torch
+
         image = view_images[0]
         mask = view_masks[0] if view_masks else None
         result = inference._pipeline.run(
             image,
             mask,
+            pointmap=torch.from_numpy(view_pointmaps[0]).float(),
             seed=seed,
             stage1_only=False,
             with_mesh_postprocess=False,
@@ -236,6 +260,7 @@ def run_inference(
         result = inference._pipeline.run_multi_view(
             view_images=view_images,
             view_masks=view_masks,
+            view_pointmaps=view_pointmaps,
             seed=seed,
             mode="multidiffusion",
             stage1_inference_steps=stage1_steps,
@@ -250,7 +275,7 @@ def run_inference(
     saved_files = []
     
     print(f"\n{'='*60}")
-    print(f"Inference completed!")
+    print("Canonical reconstruction generated; final grounding still required.")
     print(f"Generated coordinates: {result['coords'].shape[0] if 'coords' in result else 'N/A'}")
     print(f"{'='*60}")
     
@@ -258,7 +283,7 @@ def run_inference(
         output_path = output_dir / "result.glb"
         result['glb'].export(str(output_path))
         saved_files.append("result.glb")
-        print(f"✓ GLB file saved to: {output_path}")
+        print(f"Canonical intermediate GLB saved to: {output_path}")
     
     if 'gs' in result:
         output_path = output_dir / "result.ply"
@@ -276,17 +301,40 @@ def run_inference(
         print(f"✓ Mesh information generated (included in GLB)")
     
     print(f"\n{'='*60}")
-    print(f"All output files saved to: {output_dir}")
-    print(f"Saved files: {', '.join(saved_files)}")
+    print(f"Canonical intermediate outputs saved to: {output_dir}")
+    print(f"Intermediate files: {', '.join(saved_files)}")
     print(f"{'='*60}")
     
     if attention_logger is not None:
         attention_logger.close()
     
-    print(f"\nFile descriptions:")
-    print(f"- PLY file: Gaussian Splatting format with position and color information")
-    print(f"  * Recommended to use specialized Gaussian Splatting viewers")
-    print(f"- GLB file: Complete 3D mesh model, can be viewed in Blender, Three.js, etc.")
+    if result.get("glb") is None:
+        raise RuntimeError("Grounding requires an exported mesh GLB")
+
+    import numpy as np
+    import torch
+    from run_inference_weighted import merge_glb_with_da3_aligned
+
+    pose = {}
+    for key in ("scale", "rotation", "translation"):
+        if key not in result or result[key] is None:
+            raise RuntimeError(f"Grounding requires the reconstructed object pose: missing {key}")
+        value = result[key]
+        pose[key] = value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value)
+    merged_path = merge_glb_with_da3_aligned(
+        output_dir / "result.glb", da3_path.parent, pose,
+        output_path=output_dir / "result_merged_scene.glb",
+    )
+    if merged_path is None or not Path(merged_path).is_file():
+        raise RuntimeError("Failed to align the reconstructed object with the DA3 scene")
+    grounded = finalize_grounded_outputs(
+        {mask_prompt or "object": Path(merged_path)}, da3_path, output_dir,
+        ground_plane=ground_plane,
+    )
+    print("Canonical intermediates (not grounded): result.glb, result.ply")
+    print(f"Final grounded scene: {grounded['grounded_glb_path']}")
+    print(f"Final grounded scene with floor: {grounded['grounded_floor_glb_path']}")
+    return grounded
 
 
 def main():
@@ -294,18 +342,21 @@ def main():
         description="SAM 3D Objects Inference Script - Supports single-view and multi-view 3D reconstruction",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+All examples require --da3_output /path/to/da3_output.npz.
+Canonical result.glb/result.ply are intermediates, not grounded final scenes.
+
 Examples:
   # Multi-view inference (mask_prompt=None, images and masks in same directory, use all images)
-  python run_inference.py --input_path ./data/images_and_masks
+  python run_inference.py --input_path ./data/images_and_masks --da3_output ./da3/da3_output.npz
   
   # Single-view inference (specify a single image name)
-  python run_inference.py --input_path ./data/images_and_masks --image_names image1
+  python run_inference.py --input_path ./data/images_and_masks --image_names image1 --da3_output ./da3/da3_output.npz
   
   # Multi-view inference (mask_prompt!=None, images in images/, masks in specified folder)
-  python run_inference.py --input_path ./data --mask_prompt stuffed_toy
+  python run_inference.py --input_path ./data --mask_prompt stuffed_toy --da3_output ./da3/da3_output.npz
   
   # Specify multiple image names (can be any filename without extension)
-  python run_inference.py --input_path ./data --mask_prompt stuffed_toy --image_names image1,view_a,2
+  python run_inference.py --input_path ./data --mask_prompt stuffed_toy --image_names image1,view_a,2 --da3_output ./da3/da3_output.npz
         """
     )
     
@@ -355,7 +406,7 @@ Examples:
         "--decode_formats",
         type=str,
         default="gaussian,mesh",
-        help="Decode formats, comma-separated, e.g., 'gaussian,mesh' or 'gaussian' (default: gaussian,mesh)"
+        help="Decode formats, comma-separated; mesh is required (default: gaussian,mesh)"
     )
     
     parser.add_argument(
@@ -388,6 +439,13 @@ Examples:
         help="Save 3D spatial coordinates in SLAT attention files (default: False)",
     )
     
+    parser.add_argument("--da3_output", type=Path, required=True,
+                        help="DA3 NPZ with companion aligned scene.glb; required for final exports")
+    parser.add_argument("--ground_plane", nargs=4, type=float, default=None,
+                        metavar=("NX", "NY", "NZ", "D"),
+                        help="Ground plane in aligned DA3 scene coordinates; estimated if omitted")
+    parser.add_argument("--low_vram", action="store_true",
+                        help="Offload idle models to reduce GPU memory use")
     args = parser.parse_args()
     
     input_path = Path(args.input_path)
@@ -414,6 +472,9 @@ Examples:
             attention_stage=args.attention_stage,
             attention_layers=parse_attention_layers(args.attention_layers),
             save_coords=args.save_coords,
+            da3_output_path=args.da3_output,
+            ground_plane=args.ground_plane,
+            low_vram=args.low_vram,
         )
     except Exception as e:
         logger.error(f"Inference failed: {e}")

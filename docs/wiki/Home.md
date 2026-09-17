@@ -10,7 +10,8 @@ This repository is a fork of [devinli123/MV-SAM3D](https://github.com/devinli123
 2. [Installation and Setup](Installation)
 3. [Data Preparation](Data-Preparation)
 4. [Running: Reconstructing Multiple Objects from Issue #2](Running)
-5. [Model Architecture](Model-Architecture)
+5. [Default Grounded Scene Exports](Grounding)
+6. [Model Architecture](Model-Architecture)
 
 Latest step-by-step example: [SAM 3: two views, no clicks or boxes](SAM3-Two-View-Walkthrough).
 
@@ -26,7 +27,9 @@ This example uses the photos from [issue #2](https://github.com/wyim-pgl/MV-SAM3
 
 **Multi-view** means observing a scene from several viewpoints; **multi-object** means reconstructing multiple objects within the scene separately. This example uses both. To reconstruct each bearing as an independent object, each one needs its own mask folder and a consistent ID across views.
 
-> **Latest result:** [SAM 3 text-only segmentation and two-view reconstruction](SAM3-Two-View-Walkthrough) are now verified. Original views `0.png` and `2.png` each yielded one cup and seven bearing masks without clicks or boxes. Both objects completed reconstruction and pose optimization. A [separate ground-alignment pass](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table) now verifies floor contact for the cup and bearing-group meshes. Individual-bearing contact and physical volumes remain unverified.
+> **Current default:** all final mesh inference entrypoints require DA3 NPZ plus adjacent `scene.glb` and automatically export `result_grounded.glb`, `result_grounded_with_floor.glb`, and `grounding.json`. See [Grounding](Grounding) for input matching, failure/completion checks, and limits. This does not change the historical validation records below.
+
+> **Earlier SAM 3 result:** [SAM 3 text-only segmentation and two-view reconstruction](SAM3-Two-View-Walkthrough) are now verified. Original views `0.png` and `2.png` each yielded one cup and seven bearing masks without clicks or boxes. Both objects completed reconstruction and pose optimization. A [separate, scene-specific ground-alignment pass](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table) verified floor contact for the cup and bearing-group meshes. Individual-bearing contact and physical volumes remain unverified.
 
 The results below describe the earlier **three-view SAM 1 box-prompted experiment**. The new walkthrough includes separate SAM 3 inputs, commands, and results.
 
@@ -41,10 +44,12 @@ The left panel shows the merged scene; the center and right panels show the resp
 - Single-object and multi-object reconstruction
 - Attention-entropy-based weighted multi-view fusion
 - Mesh (GLB) and Gaussian splat (PLY) output
-- DA3 scene merging and optional pose optimization
+- Required default floor alignment for final meshes; optional DA3 diagnostic merging and pose optimization
+- Common floor orientation and per-group vertical drop, without automatic individual PCA uprighting; group contact does not guarantee contact for every bearing
+- Automatic plane estimation assumes a roughly upright reference camera and can reject scenes; it does not prove semantic floor identity
 - Mask generation is a separate preprocessing step. `--mask_prompt` is a **mask folder name**, not a sentence passed to a segmentation model.
 - Small metallic bearings, reflective surfaces, occlusion, and too few views can reduce reconstruction quality.
-- Automatic recovery of real-world dimensions and measurement accuracy are not guaranteed.
+- Automatic recovery of real-world dimensions and measurement accuracy are not guaranteed. Physical-volume estimation and reference calibration are not implemented yet.
 
 ## References
 

@@ -176,6 +176,11 @@ python scripts/run_da3.py \
   --output_dir ./da3_outputs/example
 ```
 
+Keep both `da3_output.npz` and its adjacent aligned `scene.glb`; final mesh
+inference requires both. The first DA3 filename must match the first inference
+view. Rerun DA3 when changing the reference view or view subset, and keep
+visualization enabled (do not use `--no_vis`).
+
 ### 3. Reconstruction
 
 ```bash
@@ -187,8 +192,22 @@ python run_inference_weighted.py \
 ```
 
 Outputs land in `visualization/<scene>/<object>/<scene>_<object>_<mode>_<ts>/`:
-`result.glb` (mesh with vertex colours), `result.ply` (Gaussian splat),
-`params.npz`, and `inference.log`.
+`result_grounded.glb` (final objects), `result_grounded_with_floor.glb` (with a
+visible floor), and `grounding.json` (completion manifest with output hashes).
+`result.glb` (canonical mesh), `result.ply` (Gaussian splat), `params.npz`, and
+`inference.log` remain intermediate/diagnostic outputs, not grounded finals.
+
+Grounding is automatic for basic, weighted single-/multi-object, batch, and
+Python-example inference. Mesh decoding and DA3 inputs are required; there is no
+disabling flag. A shared floor orientation plus per-group vertical translation
+preserves shape, colors, scale, and floor-plane lateral centroids, without
+individual PCA uprighting. The group minimum touches glTF Y=0 (Blender Z=0),
+not necessarily every bearing surface.
+
+Unreliable planes or implausible support fail rather than inventing a floor from
+bounds. Failed runs return nonzero and cannot count as successful final exports;
+new attempts invalidate old finals. See [Grounding](./docs/wiki/Grounding.md) for
+verified explicit planes (`--ground_plane NX NY NZ D`), limitations, and migration.
 
 Drop `--low_vram` on a card with more than 24 GB.
 
@@ -199,9 +218,14 @@ loading against roughly 50 s of reconstruction. `run_batch.py` loads once and
 loops:
 
 ```bash
-python scripts/run_batch.py --data ./data --mask_prompt object --low_vram
-python scripts/run_batch.py --data ./data --scenes 1124 1125 --skip_done
+python scripts/run_batch.py --data ./data --mask_prompt object --da3_dir ./da3_outputs --low_vram
+python scripts/run_batch.py --data ./data --scenes 1124 1125 --da3_dir ./da3_outputs --skip_done
 ```
+
+Prepare `<da3_dir>/<scene>/da3_output.npz` and adjacent `scene.glb` for every
+scene first. Batch fails fast on missing DA3 inputs, without fallback.
+`--skip_done` validates complete grounded outputs and their hashes for the
+requested mask; a canonical `result.glb` alone is not sufficient.
 
 ### Runnable examples
 
@@ -212,9 +236,10 @@ photos through segmentation, depth and reconstruction) and `reconstruct_api.py`
 
 ### Multi-object inference
 
-Several objects in one scene, each with its own mask directory. `--merge_da3_glb`
-puts the reconstructions back into the DA3 scene, and `--run_pose_optimization`
-refines how they sit relative to each other.
+Several objects in one scene, each with its own mask directory. The optional
+`--merge_da3_glb` adds DA3-scene diagnostic exports, and
+`--run_pose_optimization` refines placement before grounding. Grounded finals
+are always produced on success, even without `--merge_da3_glb`.
 
 ```bash
 python run_inference_weighted.py \

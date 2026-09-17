@@ -5,6 +5,7 @@
 - [Data Preparation](Data-Preparation)
 - [Running: Earlier SAM 1 Example](Running)
 - [SAM 3: Text-Only, Two-View Walkthrough](SAM3-Two-View-Walkthrough)
+- [Default Grounded Scene Exports](Grounding)
 - [Model Architecture](Model-Architecture)
 
 ---

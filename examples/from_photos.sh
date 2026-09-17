@@ -30,14 +30,18 @@ read -rp "Continue? [y/N] " reply
 
 # 2. Depth and poses per scene.
 echo "==> Depth and poses (DA3)"
+scenes=()
 for scene_dir in data/*/; do
     scene="$(basename "$scene_dir")"
     [[ -d "$scene_dir/object" ]] || continue
-    [[ -f "da3_outputs/$scene/da3_output.npz" ]] && continue
+    scenes+=("$scene")
+    [[ -f "da3_outputs/$scene/da3_output.npz" && -f "da3_outputs/$scene/scene.glb" ]] && continue
     python scripts/run_da3.py --image_dir "./data/$scene/images" \
-        --output_dir "./da3_outputs/$scene" --no_vis
+        --output_dir "./da3_outputs/$scene"
 done
 
 # 3. Reconstruct every scene on a single model load.
 echo "==> Reconstruction"
-python scripts/run_batch.py --data ./data --mask_prompt object --low_vram --skip_done
+[[ ${#scenes[@]} -gt 0 ]] || { echo "No prepared object scenes found." >&2; exit 1; }
+python scripts/run_batch.py --data ./data --scenes "${scenes[@]}" \
+    --mask_prompt object --low_vram --skip_done

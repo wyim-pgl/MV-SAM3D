@@ -259,6 +259,12 @@ def normalized_gaussian(scene_gs, in_place=False, outlier_percentile=None):
 
 
 def make_scene(*outputs, in_place=False):
+    """Compose an ungrounded Gaussian intermediate for analysis/rendering.
+
+    This low-level operation does not export a final supported scene. Use
+    run_weighted_inference (with DA3) for grounded final GLBs and grounding.json.
+    Canonical/diagnostic Gaussian data must not be labeled as ground-aligned.
+    """
     if not in_place:
         outputs = [deepcopy(output) for output in outputs]
 

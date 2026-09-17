@@ -6,7 +6,9 @@ This is the completed SAM 3 workflow for issue #2. It uses **only the original f
 
 **No clicks, boxes, or manually drawn masks were used for this run.** The prompts were `red cup` and `metal ball bearing`, with explicit expected counts of 1 and 7. Counts are selection/validation settings, not a guarantee that a language prompt will detect the requested number.
 
-## Verified outcome
+> **Current default:** basic, weighted single-/multi-object, batch, and Python-example inference now require matching DA3 NPZ plus adjacent aligned `scene.glb` and mesh decoding. Successful runs automatically produce `result_grounded.glb`, `result_grounded_with_floor.glb`, and `grounding.json`; there is no disabling flag. See [Grounding](Grounding) for completion/hash checks, plane overrides, and limitations. The figures, test count, and one-off export below remain records of the earlier run, not measurements of this new default.
+
+## Verified outcome (historical run)
 
 - SAM 3 selected one cup and seven distinct bearing masks in **each** image.
 - Four RGBA group masks were saved and visually inspected.
@@ -152,7 +154,7 @@ python scripts/run_da3.py \
   --output_dir ./da3_outputs/issue2_seven_bearings
 ```
 
-Run DA3 separately in `mvsam3d`. The optional preprocessing `--run_da3` flag would otherwise try to run it in the SAM 3 environment, where DA3 was not installed. Different image aspect ratios can cause DA3 center cropping; inspect the depth and scene output.
+Run DA3 separately in `mvsam3d`. The optional preprocessing `--run_da3` flag would otherwise try to run it in the SAM 3 environment, where DA3 was not installed. Different image aspect ratios can cause DA3 center cropping; inspect the depth and scene output. Current final exports require the adjacent `scene.glb`, so keep visualization enabled. The first DA3 filename must match the first inference view; rerun DA3 for any different reference or subset, including a view-0-only run.
 
 ## 7. Reconstruct and optimize both objects
 
@@ -172,7 +174,7 @@ The validated reconstruction/optimization run took approximately 2 minutes 14 se
 
 ## 8. Verify the actual outputs
 
-Look under `visualization/issue2_seven_bearings/multiobject/<run>/`. Do not rely on the exit code alone: inference may catch some per-object exceptions and continue.
+Look under `visualization/issue2_seven_bearings/multiobject/<run>/`. The historical code could catch some per-object exceptions and continue, so the checks below verified the recorded optimized outputs. For current runs, additionally require successful grounded completion in `grounding.json` with matching final-file hashes. Failure is nonzero and cannot count as successful final completion; new attempts invalidate old finals. Canonical and merged diagnostic GLBs are not grounded finals.
 
 ```bash
 python - <<'PY'
@@ -225,7 +227,9 @@ Full model checkpoints, large GLBs, and raw execution logs are not committed. Th
 
 ## 10. Align the reconstructed objects to the photographed table
 
-A separate postprocessing pass corrected the floating placement without rerunning generation or changing object colors. The original optimized GLB is preserved.
+This section records the **earlier one-off postprocessing pass**, not the current generic grounding algorithm. It corrected floating placement without rerunning generation or changing object colors. The original optimized GLB is preserved.
+
+Current [default grounding](Grounding) uses an automatically estimated upward-facing dominant DA3 plane (or a verified `--ground_plane NX NY NZ D` in the aligned DA3 frame), common floor orientation, and per-group vertical translation only. It does not perform the individual PCA rotations in step 4 below. Its automatic heuristic assumes a roughly upright reference camera, rejects unreliable planes or implausible support, and never invents a floor from object bounds.
 
 ![Ground-aligned cup and bearing group, viewed from two directions](assets/issue2-grounded-preview.jpg)
 

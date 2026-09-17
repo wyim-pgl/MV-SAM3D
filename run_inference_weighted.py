@@ -68,6 +68,9 @@ from sam3d_objects.utils.coordinate_transforms import (
     canonical_to_pytorch3d,
 )
 from pytorch3d.transforms import Transform3d, quaternion_to_matrix
+from sam3d_objects.pose_align.grounding import (
+    finalize_grounded_outputs, validate_grounding_inputs, invalidate_grounded_output,
+)
 
 
 def merge_glb_with_da3_aligned(
@@ -2208,6 +2211,7 @@ def run_multiobject_inference(
     pose_opt_mask_erosion: int = 3,
     pose_opt_device: str = "cuda",
     pose_opt_optimize_scale: bool = False,
+    ground_plane=None,
 ):
     """
     Run multi-object inference: process each object sequentially, then merge.
@@ -2220,6 +2224,9 @@ def run_multiobject_inference(
     logger.info(f"\n{'='*70}")
     logger.info(f"MULTI-OBJECT INFERENCE")
     logger.info(f"{'='*70}")
+    validate_grounding_inputs(da3_output_path, decode_formats or ['gaussian', 'mesh'])
+    if not mask_prompts or len(set(mask_prompts)) != len(mask_prompts):
+        raise ValueError('Multi-object grounding requires unique, nonempty object names')
     logger.info(f"Number of objects: {len(mask_prompts)}")
     logger.info(f"Objects: {mask_prompts}")
     logger.info(f"Input path: {input_path}")
@@ -2258,6 +2265,7 @@ def run_multiobject_inference(
     visualization_dir = Path("visualization")
     multiobj_output_dir = visualization_dir / dataset_name / "multiobject" / dir_name
     multiobj_output_dir.mkdir(parents=True, exist_ok=True)
+    invalidate_grounded_output(multiobj_output_dir)
     
     logger.info(f"Multi-object output directory: {multiobj_output_dir}\n")
     
@@ -2343,31 +2351,30 @@ def run_multiobject_inference(
             traceback.print_exc()
             continue
     
-    # Merge all objects
-    if object_results:
-        logger.info(f"\n{'='*70}")
-        logger.info(f"[Multi-Object] Merging {len(object_results)} objects...")
-        logger.info(f"{'='*70}\n")
-        
-        da3_dir = Path(da3_output_path).parent if da3_output_path else None
-        
-        merged_glb_path = merge_multiple_objects_glb(
-            object_results=object_results,
-            da3_output_dir=da3_dir,
-            output_dir=multiobj_output_dir,
-            merge_with_da3_scene=merge_da3_glb,
+    # Never publish a successful grounded scene after silently losing an object.
+    if len(object_results) != len(mask_prompts):
+        raise RuntimeError(f'Only {len(object_results)}/{len(mask_prompts)} objects completed; no grounded final scene produced')
+    logger.info(f"[Multi-Object] Merging {len(object_results)} objects...")
+    merge_multiple_objects_glb(
+        object_results=object_results,
+        da3_output_dir=Path(da3_output_path).parent,
+        output_dir=multiobj_output_dir,
+        merge_with_da3_scene=merge_da3_glb,
+    )
+    posed_paths = {}
+    for obj in object_results:
+        optimized = obj['output_dir'] / 'result_merged_scene_optimized.glb'
+        posed_paths[obj['object_name']] = (
+            optimized if run_pose_optimization and optimized.is_file()
+            else obj['output_dir'] / 'result_merged_scene.glb'
         )
-        
-        if merged_glb_path:
-            logger.info(f"\n{'='*70}")
-            logger.info(f"[Multi-Object] COMPLETE!")
-            logger.info(f"{'='*70}")
-            logger.info(f"Output directory: {multiobj_output_dir}")
-            logger.info(f"Merged GLB: {merged_glb_path}")
-            logger.info(f"Individual objects: {[r['output_dir'] for r in object_results]}")
-            logger.info(f"{'='*70}\n")
-    else:
-        logger.error("No objects were successfully processed")
+    # One shared plane for the entire scene, after all optional pose updates.
+    grounded = finalize_grounded_outputs(
+        posed_paths, da3_output_path, multiobj_output_dir, ground_plane=ground_plane)
+    logger.info(f"[Multi-Object] COMPLETE: grounded final scene {grounded['grounded_glb_path']}")
+    logger.info(f"With floor: {grounded['grounded_floor_glb_path']}")
+    return dict(output_dir=multiobj_output_dir, glb_path=grounded['grounded_glb_path'],
+                objects=object_results, **grounded)
 
 
 def run_single_object_for_multiobject(
@@ -2459,6 +2466,7 @@ def run_single_object_for_multiobject(
         pose_opt_mask_erosion=pose_opt_mask_erosion,
         pose_opt_device=pose_opt_device,
         pose_opt_optimize_scale=pose_opt_optimize_scale,
+        finalize_grounding=False,  # The parent grounds all objects in one frame.
     )
     
     # Copy result files to object_output_dir
@@ -2563,6 +2571,8 @@ def run_weighted_inference(
     pose_opt_mask_erosion: int = 3,
     pose_opt_device: str = "cuda",
     pose_opt_optimize_scale: bool = False,
+    ground_plane=None,
+    finalize_grounding: bool = True,
 ):
     """
     Run weighted inference with adaptive multi-view fusion.
@@ -2600,6 +2610,9 @@ def run_weighted_inference(
             merge_da3_glb: Merge SAM3D output with DA3 scene
             overlay_pointmap: Overlay SAM3D on View 0 pointmap
     """
+    # Canonical GLB/PLY are retained as intermediates. Final scenes always ground.
+    validate_grounding_inputs(da3_output_path, decode_formats or ['gaussian', 'mesh'])
+    merge_da3_glb = True  # Posed geometry is needed even without a background export request.
     if inference is None:
         config_path = f"checkpoints/{model_tag}/pipeline.yaml"
         if not Path(config_path).exists():
@@ -2701,6 +2714,9 @@ def run_weighted_inference(
                 da3_file_mapping[filename] = idx
             logger.info(f"  DA3 image order: {[Path(str(f)).stem for f in da3_image_files]}")
         
+        if not da3_file_mapping or loaded_image_names[0] != next(iter(da3_file_mapping)):
+            raise ValueError('Grounded export requires the first inference view to match the DA3 reference view; rerun DA3 for the selected images')
+
         # Match pointmaps by filename
         view_pointmaps = []
         matched_da3_extrinsics = []
@@ -2716,23 +2732,7 @@ def run_weighted_inference(
                     matched_da3_intrinsics.append(da3_intrinsics[da3_idx])
                 logger.info(f"    Matched: inference '{inf_name}' -> DA3 index {da3_idx}")
             else:
-                # Fallback: use index-based matching if filename not found
-                # This handles the case where DA3 doesn't have image_files or names don't match
-                fallback_idx = inference_image_names.index(inf_name)
-                if fallback_idx < da3_pointmaps.shape[0]:
-                    view_pointmaps.append(da3_pointmaps[fallback_idx])
-                    if da3_extrinsics is not None:
-                        matched_da3_extrinsics.append(da3_extrinsics[fallback_idx])
-                    if da3_intrinsics is not None:
-                        matched_da3_intrinsics.append(da3_intrinsics[fallback_idx])
-                    logger.warning(f"    Fallback: inference '{inf_name}' -> DA3 index {fallback_idx} (filename not found in DA3)")
-                else:
-                    raise ValueError(
-                        f"Cannot match pointmap for image '{inf_name}'!\n"
-                        f"  DA3 has {da3_pointmaps.shape[0]} pointmaps\n"
-                        f"  Inference needs {num_views} views\n"
-                        f"Please ensure DA3 was run on the SAME images."
-                    )
+                raise ValueError(f"No DA3 pointmap for image '{inf_name}'; regenerate DA3 on the same images instead of substituting another view")
         
         # Update extrinsics and intrinsics to matched order
         if matched_da3_extrinsics:
@@ -2784,6 +2784,9 @@ def run_weighted_inference(
         self_occlusion_tolerance=self_occlusion_tolerance,
     )
     
+    if finalize_grounding:
+        invalidate_grounded_output(output_dir)
+
     # Setup logging
     log_file = output_dir / "inference.log"
     logger.add(
@@ -3859,10 +3862,21 @@ def run_weighted_inference(
             result_dict['optimized_glb_path'] = optimized_glb_path
         if merged_optimized_path and merged_optimized_path.exists():
             result_dict['merged_optimized_path'] = merged_optimized_path
-        
+
+        if finalize_grounding:
+            posed_path = (merged_optimized_path if run_pose_optimization and merged_optimized_path.is_file()
+                           else output_dir / 'result_merged_scene.glb')
+            grounded = finalize_grounded_outputs(
+                {mask_prompt or 'object': posed_path}, da3_output_path, output_dir,
+                ground_plane=ground_plane)
+            result_dict.update(grounded)
+            result_dict['canonical_glb_path'] = return_glb
+            result_dict['glb_path'] = grounded['grounded_glb_path']
+            logger.info(f"Grounded final scene: {grounded['grounded_glb_path']}")
+            logger.info(f"With floor: {grounded['grounded_floor_glb_path']}")
         return result_dict
-    
-    return None
+
+    raise RuntimeError('No valid object mesh/pose available for final grounding')
 
 
 def main():
@@ -3968,9 +3982,11 @@ Examples:
     # ========================================
     # DA3 Integration Parameters
     # ========================================
-    parser.add_argument("--da3_output", type=str, default=None,
-                        help="Path to DA3 output npz file (from run_da3.py). "
-                             "Required for visibility weighting and GLB merge.")
+    parser.add_argument("--da3_output", type=str, required=True,
+                        help="DA3 NPZ and companion scene.glb, required for grounded final scenes.")
+    parser.add_argument("--ground_plane", type=float, nargs=4, default=None,
+                        metavar=('NX', 'NY', 'NZ', 'D'),
+                        help="Explicit support plane nx*x+ny*y+nz*z+d=0 in aligned DA3 coordinates; default: estimate and validate.")
     parser.add_argument("--merge_da3_glb", action="store_true",
                         help="Merge SAM3D output GLB with DA3 scene.glb (requires --da3_output)")
     parser.add_argument("--overlay_pointmap", action="store_true",
@@ -4060,6 +4076,7 @@ Examples:
                 pose_opt_mask_erosion=args.pose_opt_mask_erosion,
                 pose_opt_device=args.pose_opt_device,
                 pose_opt_optimize_scale=args.pose_opt_optimize_scale,
+                ground_plane=args.ground_plane,
             )
         else:
             # Single-object mode (original behavior)
@@ -4107,6 +4124,7 @@ Examples:
                 pose_opt_mask_erosion=args.pose_opt_mask_erosion,
                 pose_opt_device=args.pose_opt_device,
                 pose_opt_optimize_scale=args.pose_opt_optimize_scale,
+                ground_plane=args.ground_plane,
             )
     except Exception as e:
         logger.error(f"Inference failed: {e}")

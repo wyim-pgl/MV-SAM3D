@@ -6,6 +6,8 @@ This walkthrough reconstructs the red cup and bearing group in [issue #2](https:
 
 > **Scope of this page:** the commands and results below document the earlier three-view SAM 1 experiment with manually specified boxes. The newer [SAM 3 text-only two-view walkthrough](SAM3-Two-View-Walkthrough) is also complete and uses only original views `0.png` and `2.png`. Keep the input bundles and results of the two experiments separate.
 
+> **Current default:** all final mesh entrypoints now require matching DA3 NPZ and adjacent aligned `scene.glb`, with mesh decoding enabled. Successful runs automatically write `result_grounded.glb`, `result_grounded_with_floor.glb`, and `grounding.json`. Old merged GLBs remain diagnostics, not grounded finals. See [Grounding](Grounding) for plane overrides, completion hashes, batch requirements, and limits. The timings, mesh statistics, and test counts below remain historical records.
+
 ```text
 3 photographs + 3 cup masks + 3 bearing-group masks
                          ↓
@@ -52,7 +54,7 @@ test -f da3_outputs/issue2_cup_bearings/da3_output.npz
 find da3_outputs/issue2_cup_bearings -type f -name '*.glb'
 ```
 
-Scene merging also uses DA3's exported scene GLB. Keep visualization enabled; do not add `--no_vis` to this example.
+Current default grounding requires DA3's adjacent aligned `scene.glb` even without optional diagnostic merging. Keep visualization enabled; do not add `--no_vis` to this example. The first DA3 filename must match the first inference view. Rerun DA3 for a different reference or view subset.
 
 During the validated run, differing image aspect ratios triggered a center-crop warning. The resulting depth array had shape `(3, 504, 294)`, so some image-edge information may be cropped. Do not independently resize images and masks. For more reliable placement, capture a consistent scene with a common aspect ratio.
 
@@ -72,12 +74,12 @@ python run_inference_weighted.py \
 | `--input_path` | Scene containing `images/`, `red_cup/`, and `ball_bearings/` |
 | `--mask_prompt red_cup,ball_bearings` | Two comma-separated mask directories; selects multi-object mode |
 | `--da3_output` | Shared depth and camera estimates |
-| `--merge_da3_glb` | Export the reconstructed objects with the DA3 scene |
+| `--merge_da3_glb` | Optional diagnostic export with the DA3 scene; grounding runs regardless |
 | `--low_vram` | Move model stages between host and GPU memory as needed |
 
 The code processes objects sequentially and then merges their results. This command neither segments the photographs nor generates all objects in one joint model call.
 
-**Check the logs:** both `red_cup` and `ball_bearings` must complete, followed by `Merging 2 objects`. The current code can merge surviving objects after another object fails, so a final `COMPLETE` message alone does not establish success for both objects.
+**Check the logs:** both `red_cup` and `ball_bearings` must complete, followed by `Merging 2 objects`. The historical code could merge surviving objects after another object failed, so a final `COMPLETE` message alone did not establish success for both objects. Current runs require a complete `grounding.json` with matching final-file hashes; failure is nonzero and leaves no successful final completion. Starting a new attempt invalidates old finals.
 
 ## 4. Run pose optimization: verified on 24 GB after the memory fix
 
@@ -87,7 +89,7 @@ The fix uses the existing PyTorch3D `knn_points` operation to select nearest-poi
 
 **With the fix applied, the following command completed pose optimization for both the cup and bearings on the RTX 4090.** Reconstruction, optimization, and merging took approximately 2 minutes 35 seconds. The optimized GLB contained both meshes and rendered successfully. A separate loss/backward test with 100,000 target points and 50,000 source points used 18.4 MiB of additional allocated GPU memory; this is not the full pipeline's VRAM usage.
 
-> The fix is included in local commit `fa59d37` and was applied on the validation GPU server. It has not been pushed to GitHub. The old `f608536` checkout alone does not include it. Existing handling of other optimization errors can still return exit code 0; this memory fix did not change that behavior. Check per-object logs and optimized mesh counts.
+> The fix is included in local commit `fa59d37` and was applied on the validation GPU server. It has not been pushed to GitHub. The old `f608536` checkout alone does not include it. At that revision, handling of other optimization errors could still return exit code 0; this memory fix did not change that behavior. Check per-object logs and optimized mesh counts.
 
 ![Before and after pose optimization in the same run, with both objects present](assets/issue2-pose-fixed-preview.jpg)
 
@@ -109,7 +111,7 @@ The default erosion kernel of 3 can shrink small bearing masks. If very few vali
 
 ## 5. Open and inspect the outputs
 
-Multi-object results are written below. `<run>` contains the options and timestamp.
+The historical multi-object outputs are shown below. `<run>` contains the options and timestamp. Current successful runs additionally write `result_grounded.glb`, `result_grounded_with_floor.glb`, and `grounding.json` at the run level; use those as the final grounded scene outputs.
 
 ```text
 visualization/issue2_cup_bearings/multiobject/<run>/
@@ -146,7 +148,7 @@ Inspect the following:
 - Are relative placement and size reasonably consistent with the photographs?
 - Does pose optimization actually improve the result?
 
-**Ground contact is separate:** pose optimization does not constrain objects to a flat support plane or guarantee contact at Z=0. The three-view result on this page is not ground-aligned. The newer two-view SAM 3 result has a [separately verified ground-aligned export](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table).
+**Ground contact is separate:** pose optimization does not constrain objects to a flat support plane or guarantee contact at Z=0. The historical three-view result on this page is not ground-aligned. New runs perform [default grounding](Grounding) after reconstruction/optional optimization; this does not retroactively change the recorded artifacts. The newer two-view SAM 3 result has a [separately verified ground-aligned export](SAM3-Two-View-Walkthrough#10-align-the-reconstructed-objects-to-the-photographed-table).
 
 ## 6. Physical scale calibration is a separate step
 
@@ -158,7 +160,7 @@ If a measured reference length is available, measure the corresponding model fea
 scale factor = measured reference length / corresponding model length
 ```
 
-Use consistent units and apply the same factor to the full scene to preserve relative object placement. This is postprocessing calibration, not automatic recovery of physical dimensions.
+Use consistent units and apply the same factor to the full scene to preserve relative object placement. This is manual postprocessing calibration, not automatic recovery of physical dimensions. Physical-volume estimation and reference calibration are not implemented in the inference pipeline; default grounding does not supply physical units.
 
 ## 7. How the validated result was produced
 
