@@ -159,7 +159,7 @@ def extract_object_pointcloud_from_scene(
     # Per-frame binary masks at DA3 resolution, absolute depth tolerance caps
     # from the object's apparent size.
     frame_masks = {}
-    for frame_idx in range(min(N, len(masks) if masks else 0)):
+    for frame_idx in range(min(N, len(masks) if masks is not None else 0)):
         mask = masks[frame_idx]
         if mask is None:
             continue

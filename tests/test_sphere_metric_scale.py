@@ -65,9 +65,34 @@ class SphereScaleTests(unittest.TestCase):
         report = sms.estimate_scale(npz, masks, 8.0)
         self.assertEqual(report["views_used"], [0, 1, 2])
         for row in report["views"]:
-            self.assertAlmostEqual(row["diameter_da3"], 0.1, delta=0.003)
-        self.assertAlmostEqual(report["scale_mm_per_da3_unit"], 80.0, delta=2.4)
+            self.assertAlmostEqual(row["diameter_da3"], 0.1, delta=0.001)
+        self.assertAlmostEqual(report["scale_mm_per_da3_unit"], 80.0, delta=0.8)
         self.assertFalse(report["physical_measurement_verified"])
+
+    def test_off_axis_sphere_is_not_biased(self):
+        # About 23-25 degrees off the optical axis: an ellipse in the image, and
+        # z-depth noticeably shorter than the ray distance to the center.
+        npz, masks = self.write([[0.15, 0.2, 0.6], [-0.2, -0.25, 0.7]])
+        for row in sms.estimate_scale(npz, masks, 8.0)["views"]:
+            self.assertAlmostEqual(row["diameter_da3"], 0.1, delta=0.0015)
+
+    def test_masks_found_by_image_stem(self):
+        npz, masks = self.write([[0, 0, 0.6], [0, 0, 0.8]])
+        data = dict(np.load(npz))
+        data["image_files"] = np.array(["images/0.jpg", "images/1.jpg"])
+        np.savez(npz, **data)
+        (masks / "1.png").rename(masks / "1_mask.png")
+        self.assertEqual(sms.estimate_scale(npz, masks, 8.0)["views_used"], [0, 1])
+
+    def test_report_must_not_overwrite_inputs(self):
+        npz, masks = self.write([[0, 0, 0.6], [0, 0, 0.8]])
+        for target in (npz, masks / "0.png"):
+            with self.subTest(target=target.name):
+                before = target.read_bytes()
+                with self.assertRaises(SystemExit):
+                    sms.main(["--da3-output", str(npz), "--reference-masks", str(masks),
+                              "--reference-diameter-mm", "8", "--output", str(target)])
+                self.assertEqual(target.read_bytes(), before)
 
     def test_grayscale_masks(self):
         npz, masks = self.write([[0, 0, 0.6], [0, 0, 0.8]], rgba=False)

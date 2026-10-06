@@ -2,11 +2,14 @@
 """Estimate a metric scale (mm per DA3 unit) from a spherical reference of known diameter.
 
 Each view combines the reference mask silhouette with DA3 depth. A sphere of
-radius R, whose center lies at distance d, subtends a half-angle alpha with
-sin(alpha) = R / d. Its front surface lies at depth z_front = d - R, so
-R = z_front * sin(alpha) / (1 - sin(alpha)). This scale comes directly from
-the images and does not depend on the reconstructed reference mesh, its volume,
-or pose-optimization scale.
+radius R whose center lies at ray distance d, at angle theta off the optical
+axis, subtends a half-angle alpha with sin(alpha) = R / d. Its silhouette is an
+ellipse whose equivalent-circle radius is about f * tan(alpha) / cos(theta)**1.5.
+The median DA3 z-depth over the visible disk sits sqrt(1/2) * R in front of the
+center along the ray, so d = z_median / cos(theta) + sqrt(1/2) * R and
+R = sin(alpha) * z_median / cos(theta) / (1 - sqrt(1/2) * sin(alpha)).
+This scale comes directly from the images and does not depend on the
+reconstructed reference mesh, its volume, or pose-optimization scale.
 """
 import argparse
 import json
@@ -42,12 +45,28 @@ def _positive_finite(value, name):
     return number
 
 
+MEDIAN_DEPTH_OFFSET = math.sqrt(0.5)  # median of sqrt(1 - rho^2) over a unit disk
+
+
 def load_mask(path):
-    """Return a boolean mask from an RGBA (alpha) or grayscale/RGB PNG."""
+    """Return a boolean mask: any alpha > 0 (as the inference pipeline reads
+    RGBA masks), otherwise grayscale/RGB > 127."""
     image = np.array(Image.open(path))
+    if image.ndim == 3 and image.shape[-1] in (2, 4):
+        return image[..., -1] > 0
     if image.ndim == 3:
-        image = image[..., 3] if image.shape[-1] == 4 else image[..., :3].max(axis=-1)
+        image = image[..., :3].max(axis=-1)
     return image > 127
+
+
+def find_mask(mask_dir, image_name):
+    """Mask for a DA3 image: same basename, else <stem>.png or <stem>_mask.png."""
+    stem = Path(image_name).stem
+    for candidate in (image_name, f"{stem}.png", f"{stem}_mask.png"):
+        path = Path(mask_dir) / candidate
+        if path.is_file():
+            return path
+    return None
 
 
 def _erode(mask):
@@ -88,15 +107,21 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
     if values.size == 0:
         row["reason"] = "no finite positive DA3 depth inside the reference mask"
         return row
-    z_front = float(np.median(values))
-    row["depth_median"] = z_front
+    z_median = float(np.median(values))
+    row["depth_median"] = z_median
     row["depth_iqr"] = [float(np.percentile(values, 25)), float(np.percentile(values, 75))]
     focal = 0.5 * (float(intrinsics[0, 0]) + float(intrinsics[1, 1]))
     if not math.isfinite(focal) or focal <= 0:
         row["reason"] = "invalid focal length in DA3 intrinsics"
         return row
-    sin_alpha = math.sin(math.atan(radius_px / focal))
-    diameter_da3 = 2.0 * z_front * sin_alpha / (1.0 - sin_alpha)
+    ys, xs = np.nonzero(mask)
+    ray = np.linalg.solve(np.asarray(intrinsics, dtype=float),
+                          [xs.mean() + 0.5, ys.mean() + 0.5, 1.0])
+    cos_theta = 1.0 / float(np.linalg.norm(ray / ray[2]))
+    row["off_axis_deg"] = math.degrees(math.acos(min(cos_theta, 1.0)))
+    sin_alpha = math.sin(math.atan(radius_px * cos_theta ** 1.5 / focal))
+    diameter_da3 = (2.0 * sin_alpha * z_median / cos_theta
+                    / (1.0 - MEDIAN_DEPTH_OFFSET * sin_alpha))
     if not math.isfinite(diameter_da3) or diameter_da3 <= 0:
         row["reason"] = "non-finite reference diameter in DA3 units"
         return row
@@ -133,10 +158,12 @@ def estimate_scale(da3_output, mask_dir, diameter_mm, views=None, min_diameter_p
     mask_dir = Path(mask_dir)
     rows = []
     for index in indices:
-        mask_path = mask_dir / names[index]
-        if not mask_path.is_file():
+        mask_path = find_mask(mask_dir, names[index])
+        if mask_path is None:
             rows.append({"view": index, "image": names[index], "status": "unavailable",
-                         "reason": f"missing mask {mask_path}", "warnings": []})
+                         "reason": f"no mask for {names[index]} in {mask_dir} "
+                                   "(tried <name>, <stem>.png, <stem>_mask.png)",
+                         "warnings": []})
             continue
         row = measure_view(load_mask(mask_path), depth[index], intrinsics[index],
                            diameter_mm, min_diameter_px)
@@ -151,7 +178,7 @@ def estimate_scale(da3_output, mask_dir, diameter_mm, views=None, min_diameter_p
     cv = float(diameters.std() / mean_diameter) if len(diameters) > 1 else None
     report = {
         "reference_diameter_mm": diameter_mm,
-        "method": "sphere silhouette equivalent radius + median DA3 front-surface depth",
+        "method": "sphere silhouette equivalent radius + median DA3 depth, off-axis corrected",
         "views": rows,
         "views_used": [r["view"] for r in used],
         "mean_diameter_da3": mean_diameter,
@@ -207,8 +234,10 @@ def scale_scene(scene, scale_mm, reference_node=None, reference_diameter_mm=None
 
 
 def _refuse_alias(source, output):
+    if not source.exists() and not source.is_symlink():
+        return
     if source.resolve() == output.resolve() or (output.exists() and source.samefile(output)):
-        raise ValueError("output must not overwrite the input (including links)")
+        raise ValueError(f"output {output} must not overwrite input {source} (including links)")
 
 
 def main(argv=None):
@@ -234,9 +263,18 @@ def main(argv=None):
             raise ValueError("--apply-to and --scaled-output must be given together")
         if args.reference_node and args.apply_to is None:
             raise ValueError("--reference-node requires --apply-to")
+        inputs = [args.da3_output]
+        if args.reference_masks.is_dir():
+            inputs += sorted(p for p in args.reference_masks.iterdir() if p.is_file())
         if args.apply_to is not None:
-            _refuse_alias(args.apply_to, args.scaled_output)
-            _refuse_alias(args.apply_to, args.output)
+            inputs.append(args.apply_to)
+        outputs = [args.output] + ([args.scaled_output] if args.scaled_output else [])
+        for output in outputs:
+            for source in inputs:
+                _refuse_alias(source, output)
+        if args.scaled_output is not None and (
+                args.scaled_output.resolve() == args.output.resolve()):
+            raise ValueError("--output and --scaled-output must differ")
         report = estimate_scale(args.da3_output, args.reference_masks,
                                 args.reference_diameter_mm, args.views, args.min_diameter_px,
                                 args.allow_small, args.max_cv, args.allow_inconsistent)
@@ -247,12 +285,17 @@ def main(argv=None):
             scene = trimesh.load(args.apply_to, force="scene", process=False)
             rows, reference = scale_scene(scene, report["scale_mm_per_da3_unit"],
                                           args.reference_node, report["reference_diameter_mm"])
-            scene.export(args.scaled_output)
             report["glb"] = {"input": str(args.apply_to), "scaled_output": str(args.scaled_output),
                              "units": "mm", "assumes_glb_in_da3_frame": True,
                              "nodes": rows, "reference_check": reference}
-        args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n",
+            temp_glb = args.scaled_output.with_name(args.scaled_output.name + ".tmp")
+            scene.export(temp_glb, file_type="glb")
+        temp_report = args.output.with_name(args.output.name + ".tmp")
+        temp_report.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n",
                                encoding="utf-8")
+        if args.apply_to is not None:
+            temp_glb.replace(args.scaled_output)
+        temp_report.replace(args.output)
     except (ValueError, OSError, OverflowError) as exc:
         parser.error(str(exc))
     for row in report["views"]:

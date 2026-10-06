@@ -3915,6 +3915,17 @@ def _optional_positive_float(value: str) -> Optional[float]:
     return number
 
 
+def _nonnegative_float(value: str) -> float:
+    """Parse a finite float >= 0."""
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a number >= 0, got {value!r}") from exc
+    if not np.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError(f"expected a number >= 0, got {value!r}")
+    return number
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAM 3D Objects Weighted Inference - Per-latent weighted multi-view fusion",
@@ -4049,7 +4060,7 @@ Examples:
                              "apparent size per view; prevents small objects (e.g. a bearing) from collecting "
                              "background points and inflating the optimized scale. 'none' restores the purely "
                              "relative 10%% tolerance (default: 0.5)")
-    parser.add_argument("--pose_opt_min_scale_px", type=float, default=32.0,
+    parser.add_argument("--pose_opt_min_scale_px", type=_nonnegative_float, default=32.0,
                         help="Pose optimization: keep an object's scale fixed when its mask is narrower than "
                              "this many pixels (equivalent-circle diameter) in every view; such objects are "
                              "reconstructed too coarsely for scale fitting. 0 disables the guard (default: 32)")
