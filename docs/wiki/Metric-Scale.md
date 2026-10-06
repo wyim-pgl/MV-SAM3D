@@ -56,6 +56,16 @@ The cup was measured directly from DA3 points and silhouettes, multiplied by the
 
 The best photo-based estimate is **height ≈ 99–104 mm, rim ≈ 85–94 mm, base ≈ 57–62 mm**. The grounded SAM 3D cup is 100.3 mm tall, which agrees, but 111 mm wide at the rim, which is too wide (the shape distortion noted above). Fusing all three DA3 views into one frustum fit failed (35 % residual), which indicates the three DA3 camera poses disagree by several centimetres; per-view numbers are therefore reported separately. **The physical cup must be measured with a ruler to validate these numbers.**
 
+### Product identification and capacity check (2026-10-05)
+
+The cup is a **Kirkland Signature 18 oz red plastic cold cup** ([Costco listing](https://www.costcobusinessdelivery.com/p/-/kirkland-signature-plastic-cold-cups-red-18-oz-240-ct/100338193)). The listings found (Costco US/UK/Canada, Amazon, Walmart) state only the capacity, 18 oz = 532 mL. They give no per-cup height or diameters; Amazon's "5 × 12 in" is the sleeve. So no published dimension is available as ground truth yet.
+
+Capacity is still a useful independent check. A frustum with the photo estimate above holds about **448 mL** (397–504 mL across the estimate's range). An 18 oz cup must hold at least 532 mL to the brim, and brim capacity is usually above the nominal value. The photo-based lengths are therefore probably **at least 6 % too small** (× 1.06 for 532 mL, × 1.10 for 600 mL). A plausible cause is DA3 depth on the 20 px specular bearing bleeding toward the deeper background: around the bearing, background depth is 0.016 units deeper in view 1. That makes the bearing look larger in DA3 units and the scale smaller. This has not been verified.
+
+The grounded SAM 3D cup's convex hull is 591 mL, but its rim (≈ 130 mm wide at the top) is clearly too wide, so this agreement means little.
+
+**To settle it:** measure the cup with a ruler (height, outer rim Ø, base Ø), and fill it to the brim with water and weigh it (grams ≈ mL). Either gives the absolute scale for this scene.
+
 ## Recommended procedure
 
 1. **Photograph at full resolution.** Upload or copy the original camera files (≥ 12 MP). GitHub issue attachments of 502 × 668 px are too small.
