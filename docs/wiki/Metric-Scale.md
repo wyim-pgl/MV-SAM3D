@@ -84,7 +84,7 @@ Tests: `python -m unittest discover -s tests -p test_pose_target_extraction.py -
 
 ## Script
 
-`scripts/sphere_metric_scale.py` implements step 5. *Status: on branch `fix/metric-scale-small-reference` (see issue [#13](https://github.com/wyim-pgl/MV-SAM3D/issues/13) for the pull request).*
+`scripts/sphere_metric_scale.py` implements step 5. *Status: in pull request [#14](https://github.com/wyim-pgl/MV-SAM3D/pull/14) (branch `fix/metric-scale-small-reference`), pending merge into `main`.*
 
 ```bash
 python scripts/sphere_metric_scale.py \
