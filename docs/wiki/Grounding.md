@@ -49,7 +49,7 @@ A common rigid transform orients the support plane, then each object group recei
 
 Final standard glTF exports use **Y=0** for the floor. Blender's standard glTF importer maps this to **Blender Z=0**; do not add a second axis conversion. The visible floor is a display aid, not reconstructed geometry for measurement.
 
-Unreliable plane fits and implausible object support are rejected. The pipeline does not invent a floor from object bounds. Confidence thresholds may reject some scenes. Inspect the DA3 geometry and reference frame before retrying.
+Unreliable plane fits and implausible object support are rejected. The pipeline does not invent a floor from object bounds. With an estimated plane, each object's lowest point must lie between −25 % and +75 % of a reference height above it. The reference height is the larger of the object's own height and 25 % of the tallest object's height (since 2026-10-05). A small object such as an 8 mm bearing therefore uses the precision the plane actually has at scene scale, not a fraction of its own size. `grounding.json` records `min_y_before_shift`, `height` and `support_reference_height` for every object. Confidence thresholds may reject some scenes. Inspect the DA3 geometry and reference frame before retrying.
 
 ### Verified explicit plane
 
