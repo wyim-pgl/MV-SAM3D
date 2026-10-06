@@ -17,23 +17,27 @@ MV-SAM3D outputs are **not in physical units**. DA3 depth and SAM 3D object scal
 
 ## Scale measured from the photos instead of from the mesh
 
-A sphere's silhouette gives its size exactly, independent of how badly the sphere is reconstructed. For each view, with equivalent silhouette radius *r* (pixels at DA3 resolution), focal length *f*, and median DA3 depth *z* on the visible front surface:
+A sphere's silhouette gives its size exactly, independent of how badly the sphere is reconstructed. Each view uses the equivalent silhouette radius *r* (pixels at DA3 resolution), the focal length *f*, the angle θ between the optical axis and the ray through the silhouette centroid, and the median DA3 z-depth *z* inside the mask:
 
 ```text
-alpha        = atan(r / f)
-R (DA3 unit) = z * sin(alpha) / (1 - sin(alpha))
+alpha        = atan(r * cos(theta)^1.5 / f)          # off-axis silhouette is an ellipse
+R (DA3 unit) = sin(alpha) * (z / cos(theta)) / (1 - sqrt(1/2) * sin(alpha))
 scale        = known diameter in mm / (2 R)          [mm per DA3 unit]
 ```
 
+The `sqrt(1/2)` term accounts for the median depth over the visible disk lying 0.71 R in front of the sphere's center.
+
+> ✏️ PARTIAL (2026-10-05, second pass): the first version used `alpha = atan(r/f)`, `R = z sin(alpha)/(1 − sin(alpha))`. That ignored the off-axis angle and treated the median depth as the front point. On synthetic spheres it overestimated the diameter by 2.3 % on axis and 7 % at 25°. The issue #9 bearing is 22°, 24° and 12° off axis, so the scale changed from 354.7 to **368.7 mm per DA3 unit**. Numbers below use the corrected value except where marked "first-pass".
+
 Issue #9 results (DA3 process resolution 378 × 504):
 
-| View | Bearing width (photo px) | Median depth | Bearing diameter (DA3 units) |
-| --- | ---: | ---: | ---: |
-| 0 (oblique) | 28.3 | 0.4734 | 0.02354 |
-| 1 (side) | 23.9 | 0.5635 | 0.02346 |
-| 2 (top-down) | 18.4 | 0.6435 | 0.02068 |
+| View | Bearing width (photo px) | Off-axis angle | Median depth | Bearing diameter (DA3 units) | mm per unit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0 (oblique) | 28.3 | 21.6° | 0.4734 | 0.02250 | 355.6 |
+| 1 (side) | 23.9 | 24.0° | 0.5635 | 0.02224 | 359.7 |
+| 2 (top-down) | 18.4 | 11.8° | 0.6435 | 0.02035 | 393.0 |
 
-Mean 0.02256 DA3 units, coefficient of variation 5.9 % → **354.7 mm per DA3 unit** (340.5 using views 0–1 only; view 2 has the smallest bearing and the lowest SAM 3 score, 0.41).
+Mean 0.02170 DA3 units, coefficient of variation 4.4 % → **368.7 mm per DA3 unit**. Using views 0–1 only gives 357.6; view 2 has the smallest bearing and the lowest SAM 3 score, 0.41.
 
 ## Cup size estimated from the photos
 
@@ -41,15 +45,16 @@ The cup was measured directly from DA3 points and silhouettes, multiplied by the
 
 | Method | Height (mm) | Rim Ø (mm) | Base Ø (mm) |
 | --- | ---: | ---: | ---: |
-| Side view 1, silhouette widths with depth correction | ≈ 94–98 (front surface, rim lip excluded) | 80–84 (below lip) | 52–54 (10 % above base) |
-| Frustum fit to DA3 points, view 1 (best single view) | 98.9 | 81.7 | 59.0 |
-| Frustum fit, views 0 / 2 (partial surfaces) | 83.7 / 85.8 | 89.9 / 96.6 | 63.2 / 54.3 |
-| SAM 3D cup, original pose, × 354.7 | 102.5 | 108.3 | 59.1 |
-| SAM 3D cup, optimized pose, × 354.7 | 92.3 | 97.5 | 53.3 |
+| Side view 1, silhouette widths with depth correction | ≈ 97.7–101.9 (front surface, rim lip excluded) | 83.2–87.3 (below lip) | 54.1–56.1 (10 % above base) |
+| Frustum fit to DA3 points, view 1 (best single view) | 102.8 | 84.9 | 61.3 |
+| Frustum fit, views 0 / 2 (partial surfaces) | 87.0 / 89.2 | 93.5 / 100.4 | 65.7 / 56.4 |
+| SAM 3D cup, original pose, × 368.7 | 106.6 | 112.6 | 61.4 |
+| SAM 3D cup, optimized pose, × 368.7 | 96.0 | 101.4 | 55.4 |
+| **Grounded final scene (PR #14), × 368.7, vertical extent / horizontal AABB** | **100.3** | **111.0** (outer, incl. lip) | — |
 | Previous approach: cup ÷ bearing mesh, original GLB | 110.7 | 116.9 | 63.8 |
 | Previous approach: cup ÷ bearing mesh, optimized GLB | 62.0 | 65.5 | 35.8 |
 
-The best photo-based estimate is **height ≈ 95–100 mm, rim ≈ 82–90 mm, base ≈ 55–60 mm**. Fusing all three DA3 views into one frustum fit failed (35 % residual), which indicates the three DA3 camera poses disagree by several centimetres; per-view numbers are therefore reported separately. **The physical cup must be measured with a ruler to validate these numbers.**
+The best photo-based estimate is **height ≈ 99–104 mm, rim ≈ 85–94 mm, base ≈ 57–62 mm**. The grounded SAM 3D cup is 100.3 mm tall, which agrees, but 111 mm wide at the rim, which is too wide (the shape distortion noted above). Fusing all three DA3 views into one frustum fit failed (35 % residual), which indicates the three DA3 camera poses disagree by several centimetres; per-view numbers are therefore reported separately. **The physical cup must be measured with a ruler to validate these numbers.**
 
 ## Recommended procedure
 
@@ -71,16 +76,29 @@ Change 1 alone reduced the bearing inflation from × 1.61 to × 1.25. The remain
 
 Issue #9 rerun with the same command (`--run_pose_optimization --pose_opt_optimize_scale`), RTX 4090:
 
-| | Bearing scale | Bearing largest extent (mm, × 354.7) | Cup scale |
+| | Bearing scale | Bearing largest extent (mm, × 354.7, first-pass scale) | Cup scale |
 | --- | ---: | ---: | ---: |
 | Before (original pose) | 0.02379 | 8.4 | 0.3347 |
 | Before (optimized) | 0.03821 | 13.5 | 0.3012 |
 | Size-aware tolerance only | 0.02966 | ≈ 10.5 | 0.3009 |
 | **After both changes (optimized)** | **0.02379** (fixed, 28.3 px < 32) | **8.4** (ratio 1.05) | **0.3010** |
 
-The bearing mesh is still flattened (shortest/longest extent 0.67). Only better photos fix that. As before, automatic grounding rejected the bearing's support plane, so the run exits 1 after writing both merged GLBs. This grounding failure predates the fix.
+The bearing mesh is still flattened (shortest/longest extent 0.67). Only better photos fix that.
 
-Tests: `python -m unittest discover -s tests -p test_pose_target_extraction.py -v` (synthetic 8 mm sphere in front of a wall: the old tolerance pulls in wall points, the new one keeps the target within the sphere). The full suite passes: 60 tests, 1 opt-in CUDA test skipped.
+### Grounding fix (2026-10-05, second pass)
+
+Automatic grounding had rejected the bearing (`Estimated plane does not plausibly support metal_ball`) in every issue #9 run. The estimated floor was correct: 27 % of DA3 points are inliers and the cup sits within 3 mm of it. The bearing's lowest point, however, was 0.015 DA3 units (≈ 5.6 mm) below the floor. The old rule allowed only 25 % of the object's **own** height (≈ 2 mm for an 8 mm bearing), which is finer than the plane can resolve. Floor points near both objects also show a second layer about 0.024 units lower, consistent with DA3 view misregistration.
+
+The support band now uses the larger of the object's own height and 25 % of the tallest object's height. `grounding.json` records `min_y_before_shift`, `height` and `support_reference_height` for every object. With this change the issue #9 command **completes end to end for the first time** (exit 0) and writes `result_grounded.glb` and `result_grounded_with_floor.glb`. The bearing is lifted 5.6 mm onto the floor. Its band is −0.017 to +0.051 units, so a bearing about 0.002 units lower would still be rejected; such a scene needs `--ground_plane`.
+
+Grounded scene in mm (× 368.7, glTF Y-up):
+
+| Object | Vertical extent | Horizontal AABB | PCA extents |
+| --- | ---: | --- | --- |
+| Cup | 100.3 mm | 111.0 × 110.8 mm | 116.6 × 109.8 × 108.1 mm |
+| Bearing | 8.6 mm | 7.8 × 8.7 mm | 8.7 × 8.2 × 5.8 mm |
+
+Tests: `python -m unittest discover -s tests -p test_pose_target_extraction.py -v` (synthetic 8 mm sphere in front of a wall: the old tolerance pulls in wall points, the new one keeps the target within the sphere). The full suite passes: 65 tests, 1 opt-in CUDA test skipped (after the grounding and review fixes).
 
 ## Script
 
@@ -103,7 +121,7 @@ python scripts/sphere_metric_scale.py \
 - `--apply-to` writes a copy of the GLB scaled uniformly to millimetres and reports each node's AABB and PCA extents in mm. `--reference-node` compares that node with the known diameter, which exposes an inflated or truncated reference mesh. The input GLB is never overwritten.
 - The report sets `physical_measurement_verified: false`.
 
-Issue #9 run (8 mm bearing): with defaults the command **refuses** the data because every view is below 32 px. With `--allow-small --allow-inconsistent` it gives 339.9 / 341.0 / 386.9 mm per unit (mean 354.65, CV 0.059). Scaled nodes:
+Issue #9 run (8 mm bearing): with defaults the command **refuses** the data because every view is below 32 px. With `--allow-small` it gives 355.6 / 359.7 / 393.0 mm per unit (mean 368.7, CV 0.044; first-pass formula: 339.9 / 341.0 / 386.9, mean 354.65). Scaled nodes, first-pass scale:
 
 | GLB | Bearing PCA extents (mm) | Bearing largest ÷ 8 mm | Cup PCA extents (mm) |
 | --- | --- | ---: | --- |
