@@ -73,6 +73,7 @@ def extract_object_pointcloud_from_scene(
     depth_tolerance: float = 0.1,
     max_points: int = 100000,
     mask_erosion_kernel: int = 3,
+    size_tolerance_factor: Optional[float] = 0.5,
 ) -> np.ndarray:
     """
     Extract object points from DA3 scene.glb using masks (back-projection method).
@@ -92,6 +93,12 @@ def extract_object_pointcloud_from_scene(
             - 0: No erosion
             - 3: Recommended (removes 1-2px edge errors)
             - 5: More conservative (removes 2-3px edge errors)
+        size_tolerance_factor: Caps the depth tolerance at this fraction of the
+            object's apparent size in each view (equivalent mask diameter x
+            median mask depth / focal length). A purely relative tolerance is
+            larger than small objects themselves and pulls in surface points
+            behind them, which inflates the optimized scale. None disables
+            the cap (previous behavior).
         
     Returns:
         object_points: (N, 3) in aligned space
@@ -148,6 +155,37 @@ def extract_object_pointcloud_from_scene(
     
     # Back-project to identify object points
     is_object = np.zeros(len(points_world), dtype=bool)
+
+    # Per-frame binary masks at DA3 resolution, absolute depth tolerance caps
+    # from the object's apparent size.
+    frame_masks = {}
+    for frame_idx in range(min(N, len(masks) if masks is not None else 0)):
+        mask = masks[frame_idx]
+        if mask is None:
+            continue
+        if mask.shape != (H, W):
+            from PIL import Image
+            mask = np.array(Image.fromarray(mask).resize((W, H), Image.NEAREST))
+        mask_binary = mask > mask_threshold
+        if not mask_binary.any():
+            continue
+        if mask_erosion_kernel > 0 and HAS_CV2:
+            kernel = np.ones((mask_erosion_kernel, mask_erosion_kernel), np.uint8)
+            mask_check = cv2.erode(mask_binary.astype(np.uint8), kernel, iterations=1) > 0
+        else:
+            mask_check = mask_binary
+        size_cap = None
+        if size_tolerance_factor is not None:
+            K = intrinsics[frame_idx]
+            focal = 0.5 * (float(K[0, 0]) + float(K[1, 1]))
+            mask_depth = depth[frame_idx][mask_binary]
+            mask_depth = mask_depth[np.isfinite(mask_depth) & (mask_depth > 0)]
+            if mask_depth.size and focal > 0:
+                apparent_size = 2.0 * np.sqrt(mask_binary.sum() / np.pi) * float(np.median(mask_depth)) / focal
+                size_cap = size_tolerance_factor * apparent_size
+                logger.info(f"  Frame {frame_idx}: apparent object size {apparent_size:.4f}, "
+                            f"depth tolerance capped at {size_cap:.4f}")
+        frame_masks[frame_idx] = (mask_check, size_cap)
     
     batch_size = 50000
     num_batches = (len(points_world) + batch_size - 1) // batch_size
@@ -158,68 +196,37 @@ def extract_object_pointcloud_from_scene(
         batch_points = points_world[start_idx:end_idx]
         
         for frame_idx in range(N):
+            if frame_idx not in frame_masks:
+                continue
+            mask_check, size_cap = frame_masks[frame_idx]
             K = intrinsics[frame_idx]
             ext = extrinsics[frame_idx]
             depth_map = depth[frame_idx]
-            
-            # Handle case where masks list is shorter than DA3 frames
-            # This happens when user only uses a subset of images for inference
-            if frame_idx >= len(masks):
-                continue
-            
-            mask = masks[frame_idx]
-            
-            # Skip if no mask for this frame
-            if mask is None:
-                continue
-            
+
             # Convert to 4x4
             if ext.shape == (3, 4):
                 w2c = np.eye(4)
                 w2c[:3, :4] = ext
             else:
                 w2c = ext
-            
-            # Resize mask if needed
-            if mask.shape != (H, W):
-                from PIL import Image
-                mask = np.array(Image.fromarray(mask).resize((W, H), Image.NEAREST))
-            
-            # Apply mask erosion to remove edge errors
-            if mask_erosion_kernel > 0 and HAS_CV2:
-                kernel = np.ones((mask_erosion_kernel, mask_erosion_kernel), np.uint8)
-                mask_binary = (mask > mask_threshold).astype(np.uint8)
-                mask_eroded = cv2.erode(mask_binary, kernel, iterations=1)
-                mask_for_check = mask_eroded * 255
-            else:
-                mask_for_check = mask
-            
+
             # Project
             uv, valid, depth_proj = project_points_to_frame(batch_points, K, w2c, H, W)
-            
-            if np.any(valid):
-                u = np.clip(uv[valid, 0].astype(int), 0, W-1)
-                v = np.clip(uv[valid, 1].astype(int), 0, H-1)
-                
-                # Depth verification
-                actual_depth = depth_map[v, u]
-                projected_depth = depth_proj[valid]
-                depth_match = np.abs(actual_depth - projected_depth) < (depth_tolerance * actual_depth)
-                
-                # Check mask
-                valid_indices = np.where(valid)[0]
-                depth_matched_indices = valid_indices[depth_match]
-                
-                if len(depth_matched_indices) > 0:
-                    u_matched = u[depth_match]
-                    v_matched = v[depth_match]
-                    mask_values = mask_for_check[v_matched, u_matched]
-                    is_object_in_frame = mask_values > mask_threshold
-                    
-                    batch_is_object = np.zeros(len(batch_points), dtype=bool)
-                    batch_is_object[depth_matched_indices] = is_object_in_frame
-                    is_object[start_idx:end_idx] |= batch_is_object
-    
+            if not np.any(valid):
+                continue
+            u = np.clip(uv[valid, 0].astype(int), 0, W-1)
+            v = np.clip(uv[valid, 1].astype(int), 0, H-1)
+
+            # Depth verification: relative tolerance, capped by object size
+            actual_depth = depth_map[v, u]
+            tolerance = depth_tolerance * actual_depth
+            if size_cap is not None:
+                tolerance = np.minimum(tolerance, size_cap)
+            depth_match = np.abs(actual_depth - depth_proj[valid]) < tolerance
+            visible_indices = np.where(valid)[0][depth_match]
+            in_mask = mask_check[v[depth_match], u[depth_match]]
+            is_object[start_idx + visible_indices[in_mask]] = True
+
     # Filter object points (in aligned space)
     object_points = points_aligned[is_object]
     
@@ -232,6 +239,17 @@ def extract_object_pointcloud_from_scene(
         logger.info(f"  Downsampled to {max_points} points")
     
     return object_points
+
+
+def widest_mask_diameter_px(masks: List[Optional[np.ndarray]], mask_threshold: int = 128) -> float:
+    """Largest equivalent-circle diameter, in native mask pixels, over all views."""
+    widest = 0.0
+    for mask in masks or []:
+        if mask is None:
+            continue
+        area = int((np.asarray(mask) > mask_threshold).sum())
+        widest = max(widest, 2.0 * float(np.sqrt(area / np.pi)))
+    return widest
 
 
 # =============================================================================

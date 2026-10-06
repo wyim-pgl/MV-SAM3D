@@ -4,6 +4,8 @@
 
 `scripts/measure_scene_volumes.py` estimates geometric volumes using a known physical reference. It runs on CPU with the existing NumPy and trimesh dependencies. It does not measure the physical reference, repair meshes, or modify/export a scaled scene.
 
+> **Warning:** the reference mesh must reproduce the real reference shape. In [issue #9](https://github.com/wyim-pgl/MV-SAM3D/issues/9) the 8 mm bearing mesh was truncated and fragmented (mesh volume 12 % of its hull), so a volume factor from it would be off by about × 2 in length. Check the reference node first, or derive the scale from the reference silhouette instead: see [Metric-Scale](Metric-Scale).
+
 ## Command
 
 Use the `mvsam3d` environment, or another Python environment with NumPy and trimesh installed. Run commands from the repository root. Use an objects-only GLB, inspect its exact scene graph node names, and independently establish the reference volume and represented item count before calibration. For the verified two-view grounded scene, the input is `artifacts/grounding-pipeline/result_grounded.glb` and the reference node is `object_1_ball_bearings`. Enter actual, independently verified values into the two shell variables below; do not substitute an example value for a measurement:

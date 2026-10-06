@@ -45,6 +45,34 @@ class GroundingTests(unittest.TestCase):
         np.savez(self.da3 / 'da3_output.npz', pointmaps_sam3d=np.stack([np.full((3,4,4), i) for i in range(3)]),
                  image_files=np.array(['photos/0.png', 'photos/2.png', 'photos/5.png']))
 
+    def object_path(self, name, extents, center_y):
+        scene = trimesh.Scene()
+        transform = np.eye(4)
+        transform[1, 3] = center_y
+        scene.add_geometry(trimesh.creation.box(extents=extents), node_name='part', transform=transform)
+        path = self.root / f'{name}.glb'
+        scene.export(path)
+        return path
+
+    def test_small_object_support_is_judged_at_scene_scale(self):
+        # A bearing-sized object 0.08 below the plane: -0.8 x its own height,
+        # but within 25 % of the tallest object's height (2.0), the plane's
+        # practical resolution. It is accepted and set on the floor.
+        paths = {'cup': self.object_path('cup', [1, 2, 1], 1.0),
+                 'ball': self.object_path('ball', [0.1, 0.1, 0.1], -0.03)}
+        result = self.grounding.finalize_grounded_outputs(paths, self.da3/'da3_output.npz', self.root/'out')
+        report = json.loads(Path(result['grounding_report_path']).read_text())
+        ball = report['objects']['ball']
+        self.assertAlmostEqual(ball['support_reference_height'], 0.5)
+        self.assertAlmostEqual(ball['min_y_before_shift'], -0.08, places=6)
+        self.assertAlmostEqual(report['objects']['cup']['support_reference_height'], 2.0)
+
+    def test_small_object_far_below_plane_is_still_rejected(self):
+        paths = {'cup': self.object_path('cup', [1, 2, 1], 1.0),
+                 'ball': self.object_path('ball', [0.1, 0.1, 0.1], -0.75)}
+        with self.assertRaisesRegex(ValueError, 'plausibly support ball'):
+            self.grounding.finalize_grounded_outputs(paths, self.da3/'da3_output.npz', self.root/'out')
+
     def test_detects_horizontal_support_and_rejects_vertical_wall(self):
         plane = self.grounding.estimate_ground_plane(self.floor_points)
         np.testing.assert_allclose(plane, [0, 1, 0, 0], atol=1e-6)

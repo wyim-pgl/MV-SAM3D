@@ -248,8 +248,8 @@ def finalize_grounded_outputs(object_paths, da3_output_path, output_dir, ground_
                       common_transform=frame.tolist(), contact_scope='object/group minimum, not each disconnected instance')
         if not object_paths:
             raise GroundingError('No objects to ground')
-        final_scene = trimesh.Scene()
-        for index, (name, path) in enumerate(object_paths.items()):
+        placed = []
+        for name, path in object_paths.items():
             scene = trimesh.load(path, force='scene', process=False)
             parts = []
             for node in scene.graph.nodes_geometry:
@@ -265,11 +265,20 @@ def finalize_grounded_outputs(object_paths, da3_output_path, output_dir, ground_
             if not parts:
                 raise GroundingError(f'No mesh primitives for object {name}')
             vertices = np.concatenate([m.vertices for m in parts])
-            minimum = float(vertices[:, 1].min())
             height = float(np.ptp(vertices[:, 1]))
             if height < 1e-10:
                 raise GroundingError(f'Object {name} has no vertical extent')
-            if automatic and not (-.25 * height <= minimum <= .75 * height):
+            placed.append((name, path, parts, vertices, height))
+        # Judge support at the scale the estimated plane can resolve. A small
+        # object (e.g. an 8 mm bearing) cannot be expected to sit within a
+        # fraction of its own height of a plane fitted to noisy DA3 points, so
+        # its band is at least 25 % of the tallest object's height.
+        tallest = max(height for *_, height in placed)
+        final_scene = trimesh.Scene()
+        for index, (name, path, parts, vertices, height) in enumerate(placed):
+            minimum = float(vertices[:, 1].min())
+            reference = max(height, .25 * tallest)
+            if automatic and not (-.25 * reference <= minimum <= .75 * reference):
                 raise GroundingError(f'Estimated plane does not plausibly support {name}; supply --ground_plane after inspecting the DA3 scene')
             for part, mesh in enumerate(parts):
                 mesh.apply_translation([0, -minimum, 0])
@@ -277,6 +286,8 @@ def finalize_grounded_outputs(object_paths, da3_output_path, output_dir, ground_
                 final_scene.add_geometry(mesh, node_name=label, geom_name=label)
             report['objects'][name] = {'input': str(path), 'parts': len(parts),
                                         'vertical_shift': -minimum, 'min_y': 0.0,
+                                        'min_y_before_shift': minimum, 'height': height,
+                                        'support_reference_height': reference,
                                         'xz_centroid': vertices.mean(axis=0)[[0, 2]].tolist()}
         bounds = final_scene.bounds
         extent = bounds[1] - bounds[0]
