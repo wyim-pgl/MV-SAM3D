@@ -15,6 +15,8 @@ This repository is a fork of [devinli123/MV-SAM3D](https://github.com/devinli123
 
 Latest step-by-step example: [SAM 3: two views, no clicks or boxes](SAM3-Two-View-Walkthrough).
 
+> **Size warning (issue #9):** outputs are not in physical units, and an 8 mm bearing photographed at 502 × 668 px gave wrong sizes and shapes. Read [Real-World Size from a Spherical Reference](Metric-Scale) before reporting any dimension.
+
 Measurement tool: [reference-volume calibration](Volume-Calibration), with mesh checks and explicit assumptions. A physical reference value is required; no physical volumes have been measured for the example yet.
 
 ## This Example: Red Cup + Ball Bearings

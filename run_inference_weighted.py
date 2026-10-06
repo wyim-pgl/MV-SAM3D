@@ -2209,6 +2209,8 @@ def run_multiobject_inference(
     pose_opt_iterations: int = 300,
     pose_opt_lr: float = 0.01,
     pose_opt_mask_erosion: int = 3,
+    pose_opt_size_tolerance: Optional[float] = 0.5,
+    pose_opt_min_scale_px: float = 32.0,
     pose_opt_device: str = "cuda",
     pose_opt_optimize_scale: bool = False,
     ground_plane=None,
@@ -2323,6 +2325,8 @@ def run_multiobject_inference(
                 pose_opt_iterations=pose_opt_iterations,
                 pose_opt_lr=pose_opt_lr,
                 pose_opt_mask_erosion=pose_opt_mask_erosion,
+                pose_opt_size_tolerance=pose_opt_size_tolerance,
+                pose_opt_min_scale_px=pose_opt_min_scale_px,
                 pose_opt_device=pose_opt_device,
                 pose_opt_optimize_scale=pose_opt_optimize_scale,
             )
@@ -2413,6 +2417,8 @@ def run_single_object_for_multiobject(
     pose_opt_iterations: int = 300,
     pose_opt_lr: float = 0.01,
     pose_opt_mask_erosion: int = 3,
+    pose_opt_size_tolerance: Optional[float] = 0.5,
+    pose_opt_min_scale_px: float = 32.0,
     pose_opt_device: str = "cuda",
     pose_opt_optimize_scale: bool = False,
 ) -> Optional[dict]:
@@ -2464,6 +2470,8 @@ def run_single_object_for_multiobject(
         pose_opt_iterations=pose_opt_iterations,
         pose_opt_lr=pose_opt_lr,
         pose_opt_mask_erosion=pose_opt_mask_erosion,
+        pose_opt_size_tolerance=pose_opt_size_tolerance,
+        pose_opt_min_scale_px=pose_opt_min_scale_px,
         pose_opt_device=pose_opt_device,
         pose_opt_optimize_scale=pose_opt_optimize_scale,
         finalize_grounding=False,  # The parent grounds all objects in one frame.
@@ -2569,6 +2577,8 @@ def run_weighted_inference(
     pose_opt_iterations: int = 300,
     pose_opt_lr: float = 0.01,
     pose_opt_mask_erosion: int = 3,
+    pose_opt_size_tolerance: Optional[float] = 0.5,
+    pose_opt_min_scale_px: float = 32.0,
     pose_opt_device: str = "cuda",
     pose_opt_optimize_scale: bool = False,
     ground_plane=None,
@@ -3597,6 +3607,7 @@ def run_weighted_inference(
                 from sam3d_objects.pose_align.pose_optimization import (
                     PoseOptimizer,
                     extract_object_pointcloud_from_scene,
+                    widest_mask_diameter_px,
                 )
                 
                 # Prepare paths
@@ -3678,6 +3689,7 @@ def run_weighted_inference(
                     depth_tolerance=0.1,
                     max_points=100000,
                     mask_erosion_kernel=pose_opt_mask_erosion,
+                    size_tolerance_factor=pose_opt_size_tolerance,
                 )
                 
                 if target_points is None or len(target_points) == 0:
@@ -3713,13 +3725,24 @@ def run_weighted_inference(
                     logger.info(f"  Learning rate: {pose_opt_lr}")
                     logger.info(f"  Device: {pose_opt_device}")
                     
+                    optimize_scale = pose_opt_optimize_scale
+                    if optimize_scale and pose_opt_min_scale_px > 0:
+                        widest_px = widest_mask_diameter_px(masks)
+                        if widest_px < pose_opt_min_scale_px:
+                            optimize_scale = False
+                            logger.warning(
+                                f"  Scale optimization disabled for this object: widest mask is "
+                                f"{widest_px:.1f} px (< --pose_opt_min_scale_px {pose_opt_min_scale_px:g}). "
+                                "Its reconstruction is too coarse to fit scale; keeping the initial scale."
+                            )
+
                     optimizer = PoseOptimizer(
                         canonical_mesh_path=str(glb_path),
                         initial_pose=initial_pose,
                         target_points=target_points,
                         alignment_matrix=alignment_matrix,
                         device=pose_opt_device,
-                        optimize_scale=pose_opt_optimize_scale,
+                        optimize_scale=optimize_scale,
                     )
                     
                     # Run optimization
@@ -3879,6 +3902,19 @@ def run_weighted_inference(
     raise RuntimeError('No valid object mesh/pose available for final grounding')
 
 
+def _optional_positive_float(value: str) -> Optional[float]:
+    """Parse a positive finite float, or 'none' to disable the option."""
+    if value.strip().lower() == "none":
+        return None
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number or 'none', got {value!r}") from exc
+    if not np.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number or 'none', got {value!r}")
+    return number
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAM 3D Objects Weighted Inference - Per-latent weighted multi-view fusion",
@@ -4008,6 +4044,15 @@ Examples:
                         help="Pose optimization: learning rate (default: 0.01)")
     parser.add_argument("--pose_opt_mask_erosion", type=int, default=3,
                         help="Pose optimization: mask erosion kernel size (default: 3)")
+    parser.add_argument("--pose_opt_size_tolerance", type=_optional_positive_float, default=0.5,
+                        help="Pose optimization: cap the target depth tolerance at this fraction of the object's "
+                             "apparent size per view; prevents small objects (e.g. a bearing) from collecting "
+                             "background points and inflating the optimized scale. 'none' restores the purely "
+                             "relative 10%% tolerance (default: 0.5)")
+    parser.add_argument("--pose_opt_min_scale_px", type=float, default=32.0,
+                        help="Pose optimization: keep an object's scale fixed when its mask is narrower than "
+                             "this many pixels (equivalent-circle diameter) in every view; such objects are "
+                             "reconstructed too coarsely for scale fitting. 0 disables the guard (default: 32)")
     parser.add_argument("--pose_opt_device", type=str, default="cuda",
                         help="Pose optimization: device (cuda or cpu, default: cuda)")
     parser.add_argument("--pose_opt_optimize_scale", action="store_true",
@@ -4074,6 +4119,8 @@ Examples:
                 pose_opt_iterations=args.pose_opt_iterations,
                 pose_opt_lr=args.pose_opt_lr,
                 pose_opt_mask_erosion=args.pose_opt_mask_erosion,
+                pose_opt_size_tolerance=args.pose_opt_size_tolerance,
+                pose_opt_min_scale_px=args.pose_opt_min_scale_px,
                 pose_opt_device=args.pose_opt_device,
                 pose_opt_optimize_scale=args.pose_opt_optimize_scale,
                 ground_plane=args.ground_plane,
@@ -4122,6 +4169,8 @@ Examples:
                 pose_opt_iterations=args.pose_opt_iterations,
                 pose_opt_lr=args.pose_opt_lr,
                 pose_opt_mask_erosion=args.pose_opt_mask_erosion,
+                pose_opt_size_tolerance=args.pose_opt_size_tolerance,
+                pose_opt_min_scale_px=args.pose_opt_min_scale_px,
                 pose_opt_device=args.pose_opt_device,
                 pose_opt_optimize_scale=args.pose_opt_optimize_scale,
                 ground_plane=args.ground_plane,

@@ -105,7 +105,7 @@ python run_inference_weighted.py \
   --low_vram
 ```
 
-Default pose optimization adjusts **rotation and translation**. Add `--pose_opt_optimize_scale` to also optimize relative scale. This aligns size to the DA3 scene; it is not millimeter calibration.
+Default pose optimization adjusts **rotation and translation**. Add `--pose_opt_optimize_scale` to also optimize relative scale. This aligns size to the DA3 scene; it is not millimeter calibration. Objects narrower than 32 px in every view keep their scale fixed (`--pose_opt_min_scale_px`), and target points use a depth tolerance capped at half the object's apparent size (`--pose_opt_size_tolerance`); see [Metric-Scale](Metric-Scale#pose-optimization-fix-2026-10-05) for why.
 
 The default erosion kernel of 3 can shrink small bearing masks. If very few valid bearing points remain, first inspect the masks and depth, then consider comparing `--pose_opt_mask_erosion 1`. Pose optimization does not repair incorrect depth or masks.
 

@@ -8,6 +8,7 @@
 - [Default Grounded Scene Exports](Grounding)
 - [Model Architecture](Model-Architecture)
 - [Reference-Volume Calibration](Volume-Calibration)
+- [Real-World Size from a Spherical Reference](Metric-Scale)
 
 ---
 
