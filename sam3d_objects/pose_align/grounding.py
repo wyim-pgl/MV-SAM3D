@@ -102,8 +102,16 @@ def estimate_ground_plane(points):
     if span < 1e-10:
         raise GroundingError('Degenerate point cloud cannot define a ground plane')
     tolerance = span * 0.003
-    best = np.zeros(len(sample), dtype=bool)
-    for _ in range(256):
+    # The floor need not dominate the whole scene (objects photographed in a
+    # box corner leave ~15 % floor among walls, issue #15), but it must clearly
+    # dominate other upward-facing surfaces: at least MIN_SUPPORT of the points
+    # and DOMINANCE x the best non-parallel upward candidate. Objects must
+    # still pass the support-plausibility check in finalize_grounded_outputs.
+    min_support, dominance = 0.10, 1.5
+    candidates = []
+    # A 10 % floor needs ~4000 triplets to be sampled reliably (miss chance
+    # (1 - 0.1**3)**4000 ~ 2 %); 256 missed a 15 % floor about half the time.
+    for _ in range(4000):
         a, b, c = sample[rng.choice(len(sample), 3, replace=False)]
         normal = np.cross(b-a, c-a)
         length = np.linalg.norm(normal)
@@ -114,17 +122,27 @@ def estimate_ground_plane(points):
         if abs(normal[1]) < 0.25:
             continue
         inside = np.abs((sample-a) @ normal) <= tolerance
-        if inside.sum() > best.sum():
-            best = inside
-    if best.sum() < max(64, .25 * len(sample)):
+        candidates.append((int(inside.sum()), normal, inside))
+    if not candidates:
         raise GroundingError('No sufficiently supported ground plane; supply --ground_plane nx ny nz d in the aligned DA3 frame')
-    center = sample[best].mean(axis=0)
-    _, singular, axes = np.linalg.svd(sample[best]-center, full_matrices=False)
-    if singular[1] < span * 1e-4:
-        raise GroundingError('Ground support is collinear, not a plane')
-    normal = axes[-1]
+    candidates.sort(key=lambda item: -item[0])
+    count, best_normal, best = candidates[0]
+    rival = next((n for n, normal, _ in candidates[1:] if abs(normal @ best_normal) < 0.9), 0)
+    if count < max(64, min_support * len(sample)) or count < dominance * rival:
+        raise GroundingError('No sufficiently supported ground plane; supply --ground_plane nx ny nz d in the aligned DA3 frame')
+    # Refine with a looser band so near-parallel layers from slightly
+    # misregistered views (a few tolerance widths apart) are fitted together.
+    band = 2 * tolerance
+    normal, center = best_normal, sample[best].mean(axis=0)
+    for _ in range(2):  # fit, reselect with the refined normal, refit
+        inliers = np.abs((sample - center) @ normal) <= band
+        center = sample[inliers].mean(axis=0)
+        _, singular, axes = np.linalg.svd(sample[inliers]-center, full_matrices=False)
+        if singular[1] < span * 1e-4:
+            raise GroundingError('Ground support is collinear, not a plane')
+        normal = axes[-1] if axes[-1] @ normal >= 0 else -axes[-1]
     plane = _normalize_plane(np.r_[normal, -normal @ center])
-    if plane[1] < .25 or (np.abs(sample @ plane[:3] + plane[3]) <= tolerance).mean() < .25:
+    if plane[1] < .25 or (np.abs(sample @ plane[:3] + plane[3]) <= band).mean() < min_support:
         raise GroundingError('Refined ground plane is unreliable; supply an explicit --ground_plane')
     return plane
 

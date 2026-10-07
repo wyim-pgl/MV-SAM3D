@@ -73,6 +73,36 @@ class GroundingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'plausibly support ball'):
             self.grounding.finalize_grounded_outputs(paths, self.da3/'da3_output.npz', self.root/'out')
 
+    def box_corner(self, floor_share, floor_offsets=(0.0,)):
+        rng = np.random.default_rng(1)
+        n = 20000
+        floor_n = int(n * floor_share)
+        floor = np.c_[rng.uniform(-1, 1, floor_n), np.zeros(floor_n), rng.uniform(-1, 1, floor_n)]
+        floor[:, 1] = rng.choice(floor_offsets, floor_n)       # views disagree by a few mm
+        rest = n - floor_n
+        back = np.c_[rng.uniform(-1, 1, rest // 2), rng.uniform(0, 2, rest // 2), np.full(rest // 2, 1.0)]
+        side = np.c_[np.full(rest - rest // 2, -1.0), rng.uniform(0, 2, rest - rest // 2), rng.uniform(-1, 1, rest - rest // 2)]
+        return np.vstack([floor, back, side])
+
+    def test_box_corner_floor_found_although_walls_dominate(self):
+        # Issue #15: cup and ball photographed inside a white box. The floor is
+        # ~15 % of DA3 points and split into near-parallel layers by view
+        # misregistration; the walls are the rest.
+        points = self.box_corner(0.15, floor_offsets=(0.0, 0.004, -0.004))
+        plane = self.grounding.estimate_ground_plane(points)
+        self.assertGreater(abs(plane[1]), 0.99)
+        self.assertLess(abs(plane[3]), 0.01)
+
+    def test_two_comparable_upward_planes_are_ambiguous(self):
+        rng = np.random.default_rng(2)
+        n = 6000
+        flat = np.c_[rng.uniform(-1, 1, n), np.zeros(n), rng.uniform(-1, 1, n)]
+        tilted = np.c_[rng.uniform(-1, 1, n), np.zeros(n), rng.uniform(-1, 1, n)]
+        tilted[:, 1] = 0.8 * tilted[:, 0] + 3.0               # a ramp, not parallel
+        noise = rng.uniform(-1, 4, size=(3 * n, 3))
+        with self.assertRaisesRegex(ValueError, 'ground|support|plane'):
+            self.grounding.estimate_ground_plane(np.vstack([flat, tilted, noise]))
+
     def test_detects_horizontal_support_and_rejects_vertical_wall(self):
         plane = self.grounding.estimate_ground_plane(self.floor_points)
         np.testing.assert_allclose(plane, [0, 1, 0, 0], atol=1e-6)

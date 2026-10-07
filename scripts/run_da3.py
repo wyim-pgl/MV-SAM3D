@@ -128,6 +128,34 @@ def pointmap_to_sam3d_format(pointmap: np.ndarray) -> np.ndarray:
     return pointmap.transpose(2, 0, 1)  # (H, W, 3) -> (3, H, W)
 
 
+def check_uniform_image_sizes(image_files) -> None:
+    """Refuse a batch whose images differ in size.
+
+    DA3 center-crops a mixed batch to the smallest common size (for example
+    one portrait photo among landscape ones -> every frame cropped square)
+    without failing. Masks are later resized over the full image, so every
+    mask would be misaligned with its depth map. DA3 reads pixels without EXIF
+    rotation, so raw stored sizes are compared.
+    """
+    from PIL import Image
+
+    sizes = {}
+    for path in image_files:
+        with Image.open(path) as image:
+            sizes[Path(path).name] = image.size
+    if len(set(sizes.values())) <= 1:
+        return
+    counts = {}
+    for size in sizes.values():
+        counts[size] = counts.get(size, 0) + 1
+    common = max(counts, key=counts.get)
+    odd = ", ".join(f"{name} is {w}x{h}" for name, (w, h) in sizes.items() if (w, h) != common)
+    raise ValueError(
+        f"All images must have the same size for DA3; most are {common[0]}x{common[1]} but {odd}. "
+        "Rotate or remove the odd images (e.g. a portrait photo among landscape ones) and rerun "
+        "preprocessing, otherwise DA3 crops every frame and masks no longer match depth.")
+
+
 def run_da3_inference(
     image_dir: str,
     output_dir: str,
@@ -208,6 +236,7 @@ def run_da3_inference(
             return (1, 0, stem)  # Non-numeric names after, sorted alphabetically
     
     image_files = sorted(image_files, key=natural_sort_key)
+    check_uniform_image_sizes(image_files)
     
     if len(image_files) == 0:
         raise ValueError(f"No images found in {image_dir}")
