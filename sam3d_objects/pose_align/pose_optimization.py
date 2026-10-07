@@ -453,7 +453,8 @@ class PoseOptimizer:
         num_iterations: int = 300, 
         lr: float = 0.01, 
         early_stopping: bool = True, 
-        patience: int = 50
+        patience: int = 50,
+        scale_warmup_iterations: int = 100,
     ) -> Dict:
         """
         Run optimization.
@@ -463,6 +464,11 @@ class PoseOptimizer:
             lr: Base learning rate
             early_stopping: Enable early stopping if CD stops improving
             patience: Number of iterations to wait before stopping
+            scale_warmup_iterations: With optimize_scale, keep scale fixed for
+                this many iterations so rotation and translation converge
+                first. Otherwise a mesh initialized far from its target grows
+                until its shell reaches the target points (issue #15: a 40 mm
+                ball placed 77 mm away was scaled x3.4).
         
         Returns:
             history: Dictionary with optimization history
@@ -509,11 +515,19 @@ class PoseOptimizer:
         
         from tqdm import tqdm
         
+        warmup = scale_warmup_iterations if self.optimize_scale else 0
+        if warmup:
+            logger.info(f"  Scale fixed for the first {warmup} iterations (rotation + translation first)")
+
         with tqdm(total=num_iterations, desc="Optimizing pose") as pbar:
             for i in range(num_iterations):
+                if warmup and i == warmup:
+                    patience_counter = 0  # the scale phase starts its own patience window
                 optimizer.zero_grad()
                 loss, cd = self.compute_loss()
                 loss.backward()
+                if i < warmup:
+                    self.log_scale.grad = None  # Adam skips parameters without gradients
                 optimizer.step()
                 scheduler.step()
                 
@@ -536,7 +550,7 @@ class PoseOptimizer:
                     else:
                         patience_counter += 1
                     
-                    if patience_counter >= patience:
+                    if patience_counter >= patience and i >= warmup:
                         logger.warning(f"  Early stopping at iteration {i} (no improvement for {patience} steps)")
                         # Restore best parameters
                         if best_params is not None:

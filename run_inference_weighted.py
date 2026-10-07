@@ -2751,6 +2751,7 @@ def run_weighted_inference(
             da3_intrinsics = np.array(matched_da3_intrinsics)
         
         logger.info(f"  Successfully loaded and matched {len(view_pointmaps)} external pointmaps from DA3")
+        check_da3_aspect(view_images, view_pointmaps, inference_image_names)
     
     is_single_view = num_views == 1
     
@@ -3900,6 +3901,23 @@ def run_weighted_inference(
         return result_dict
 
     raise RuntimeError('No valid object mesh/pose available for final grounding')
+
+
+def check_da3_aspect(images, pointmaps, names) -> None:
+    """Refuse DA3 pointmaps whose aspect ratio differs from their images.
+
+    DA3 center-crops a batch of mixed-size images to a common size. Masks are
+    resized over the full image, so a cropped DA3 output misaligns every
+    mask with its depth (issue #15). Pointmaps are channel-first (3, H, W).
+    """
+    for name, image, pointmap in zip(names, images, pointmaps):
+        h, w = np.asarray(image).shape[:2]
+        H, W = np.asarray(pointmap).shape[-2:]
+        if abs(w / h - W / H) > 0.02 * (W / H):
+            raise ValueError(
+                f"DA3 output for '{name}' is {W}x{H} but the image is {w}x{h}: DA3 cropped the batch, "
+                "usually because one photo has a different size or orientation. Make all images the "
+                "same size, then rerun preprocessing and scripts/run_da3.py.")
 
 
 def _optional_positive_float(value: str) -> Optional[float]:

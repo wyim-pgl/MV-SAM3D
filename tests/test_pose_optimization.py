@@ -76,6 +76,30 @@ class PoseLossTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(param.grad).all())
             torch.testing.assert_close(param.grad, torch.zeros_like(param.grad), atol=1e-6, rtol=0)
 
+    def test_far_initial_translation_does_not_inflate_scale(self):
+        # Issue #15: SAM 3D placed the 40 mm ball 77 mm from its DA3 points and
+        # scale optimization grew it x3.4 so its shell reached the target.
+        radius, center = 0.05, np.array([0., 0., 0.5])
+        rng = np.random.default_rng(0)
+        normals = rng.normal(size=(3000, 3))
+        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+        visible = normals[normals[:, 2] < 0]        # hemisphere facing the camera
+        aligned_center = np.diag([-1., -1., 1.]) @ center
+        target = (aligned_center + radius * visible).astype(np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sphere.ply'
+            trimesh.creation.icosphere(subdivisions=3, radius=0.5).export(path)
+            opt = PoseOptimizer(
+                str(path),
+                {'scale': np.full(3, 0.1), 'rotation': np.array([1., 0., 0., 0.]),
+                 'translation': center + [0.13, 0.05, 0.13]},   # ~3.8 radii off, as in issue #15
+                target, np.eye(4), device='cpu', optimize_scale=True,
+            )
+            opt.optimize(num_iterations=300, lr=0.01)
+        pose = opt.get_optimized_pose()
+        self.assertAlmostEqual(pose['scale'][0] / 0.1, 1.0, delta=0.15)
+        self.assertLess(np.linalg.norm(pose['translation'] - center), 0.02)
+
     @unittest.skipUnless(os.environ.get('POSE_CUDA_STRESS') == '1' and torch.cuda.is_available(), 'opt-in CUDA stress test')
     def test_full_size_cuda_loss_and_backward_fit_256_mib(self):
         opt = self.make_optimizer(source_count=50000, target_count=100000, device='cuda')
