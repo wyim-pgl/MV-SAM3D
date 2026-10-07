@@ -100,6 +100,12 @@ class PoseLossTests(unittest.TestCase):
         self.assertAlmostEqual(pose['scale'][0] / 0.1, 1.0, delta=0.15)
         self.assertLess(np.linalg.norm(pose['translation'] - center), 0.02)
 
+    def test_short_runs_still_optimize_scale(self):
+        opt = self.make_optimizer(scale=True)
+        start = opt.log_scale.item()
+        opt.optimize(num_iterations=60, lr=0.01, early_stopping=False)
+        self.assertNotAlmostEqual(opt.log_scale.item(), start, places=4)
+
     @unittest.skipUnless(os.environ.get('POSE_CUDA_STRESS') == '1' and torch.cuda.is_available(), 'opt-in CUDA stress test')
     def test_full_size_cuda_loss_and_backward_fit_256_mib(self):
         opt = self.make_optimizer(source_count=50000, target_count=100000, device='cuda')

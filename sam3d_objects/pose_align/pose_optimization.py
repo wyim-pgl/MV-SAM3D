@@ -499,8 +499,16 @@ class PoseOptimizer:
             logger.info("  Optimizing: rotation + translation (scale fixed)")
         
         optimizer = torch.optim.Adam(param_groups)
-        
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
+
+        # Keep scale fixed while rotation and translation converge, but never
+        # for more than a third of the run so scale still gets optimized.
+        warmup = min(scale_warmup_iterations, num_iterations // 3) if self.optimize_scale else 0
+        # Halve every group's rate each 100 steps, counting the scale group's
+        # steps from the end of its warm-up so it starts at its full rate.
+        schedules = [lambda i: 0.5 ** (i // 100)] * len(param_groups)
+        if self.optimize_scale:
+            schedules[0] = lambda i: 0.5 ** (max(0, i - warmup) // 100)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedules)
         
         history = {
             'loss': [],
@@ -515,7 +523,6 @@ class PoseOptimizer:
         
         from tqdm import tqdm
         
-        warmup = scale_warmup_iterations if self.optimize_scale else 0
         if warmup:
             logger.info(f"  Scale fixed for the first {warmup} iterations (rotation + translation first)")
 

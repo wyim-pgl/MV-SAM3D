@@ -133,13 +133,14 @@ def estimate_ground_plane(points):
     # Refine with a looser band so near-parallel layers from slightly
     # misregistered views (a few tolerance widths apart) are fitted together.
     band = 2 * tolerance
-    center = sample[best].mean(axis=0)
-    inliers = np.abs((sample - center) @ best_normal) <= band
-    center = sample[inliers].mean(axis=0)
-    _, singular, axes = np.linalg.svd(sample[inliers]-center, full_matrices=False)
-    if singular[1] < span * 1e-4:
-        raise GroundingError('Ground support is collinear, not a plane')
-    normal = axes[-1]
+    normal, center = best_normal, sample[best].mean(axis=0)
+    for _ in range(2):  # fit, reselect with the refined normal, refit
+        inliers = np.abs((sample - center) @ normal) <= band
+        center = sample[inliers].mean(axis=0)
+        _, singular, axes = np.linalg.svd(sample[inliers]-center, full_matrices=False)
+        if singular[1] < span * 1e-4:
+            raise GroundingError('Ground support is collinear, not a plane')
+        normal = axes[-1] if axes[-1] @ normal >= 0 else -axes[-1]
     plane = _normalize_plane(np.r_[normal, -normal @ center])
     if plane[1] < .25 or (np.abs(sample @ plane[:3] + plane[3]) <= band).mean() < min_support:
         raise GroundingError('Refined ground plane is unreliable; supply an explicit --ground_plane')

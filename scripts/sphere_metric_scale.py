@@ -91,7 +91,7 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
     if area == 0:
         row["reason"] = "empty reference mask"
         return row
-    if abs(native_w / native_h - width / height) > 0.02 * (width / height):
+    if abs(native_w / native_h - width / height) > max(0.05, 14.0 / min(width, height)) * (width / height):
         row["reason"] = (f"mask aspect {native_w}x{native_h} differs from DA3 depth {width}x{height}; "
                          "DA3 probably cropped a mixed-size batch - rerun DA3 on same-size images")
         return row

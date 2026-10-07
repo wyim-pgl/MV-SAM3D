@@ -76,6 +76,10 @@ class InferenceAspectGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cropped"):
             self.runner.check_da3_aspect(images, [np.zeros((3, 378, 378))], ["0"])
 
+    def test_wide_panorama_rounding_passes(self):
+        images = [np.zeros((900, 2100, 3), np.uint8)]          # 21:9 -> 504 x 216, rounded to 224
+        self.runner.check_da3_aspect(images, [np.zeros((3, 224, 504))], ["0"])
+
     def test_matching_aspect_passes(self):
         images = [np.zeros((3024, 4032, 3), np.uint8)]
         self.runner.check_da3_aspect(images, [np.zeros((3, 378, 504))], ["0"])
