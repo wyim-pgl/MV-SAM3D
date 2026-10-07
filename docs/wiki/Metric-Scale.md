@@ -70,7 +70,7 @@ The grounded SAM 3D cup's convex hull is 591 mL, but its rim (≈ 130 mm wide at
 
 1. **Photograph at full resolution.** Upload or copy the original camera files (≥ 12 MP). GitHub issue attachments of 502 × 668 px are too small.
 2. **Make the reference big in the frame.** The reference should be at least **40–50 px wide** in every photo after downscaling, ideally ≥ 1 % of the image. Use a larger sphere (≥ 20–25 mm, matte if possible) or a flat printed ruler / ArUco / checkerboard placed next to the object at the same distance. An 8 mm polished bearing is too small and too reflective.
-3. **Take 8–20 views** around the object, keeping the reference visible.
+3. **Take 8–20 views** around the object, keeping the reference visible. **Keep every photo in the same orientation** (all landscape or all portrait). One rotated photo makes DA3 crop the whole batch, and `run_da3.py` now refuses such a set.
 4. **Scale optimization now skips small objects automatically.** `--pose_opt_optimize_scale` keeps the scale of any object narrower than 32 px in every view fixed (`--pose_opt_min_scale_px`). Before this fix it inflated the bearing by 61 %. Even with the fix, use the reference only for its silhouette (step 5), not its optimized mesh.
 5. **Derive the scale from the reference silhouette and DA3 depth**, not from the reconstructed reference mesh or its volume, then multiply object dimensions measured in the DA3 frame. The script below automates this.
 6. **Validate** against at least one independently measured dimension (for example, cup height measured with a ruler) before reporting sizes.
@@ -109,6 +109,37 @@ Grounded scene in mm (× 368.7, glTF Y-up):
 | Bearing | 8.6 mm | 7.8 × 8.7 mm | 8.7 × 8.2 × 5.8 mm |
 
 Tests: `python -m unittest discover -s tests -p test_pose_target_extraction.py -v` (synthetic 8 mm sphere in front of a wall: the old tolerance pulls in wall points, the new one keeps the target within the sphere). The full suite passes: 65 tests, 1 opt-in CUDA test skipped (after the grounding and review fixes).
+
+## Validation with a 40 mm ping-pong ball (issues #15 and #16, 2026-10-07)
+
+Ruler measurements ([#16](https://github.com/wyim-pgl/MV-SAM3D/issues/16)):
+
+| Object | Measured |
+| --- | --- |
+| Kirkland 18 oz cup (new cup) | height 110 mm, rim Ø 100 mm, base Ø 63 mm |
+| Brim volume (water weighed) | 533.80 g − 12.32 g = 521.48 g ≈ **521 mL** |
+| Ping-pong ball | Ø 40 mm (circumference 12.7 cm) |
+| Issue #9 cup | same height and base; rim slightly oval, 105 × 95 mm |
+
+**Issue #9 check:** the grounded issue #9 cup was 100.3 mm tall at 368.7 mm/unit, which is **9 % short** of 110 mm. The capacity check above had predicted at least 6 %. The 8 mm bearing reference is too small to give a reliable absolute scale.
+
+**New photos** ([#15](https://github.com/wyim-pgl/MV-SAM3D/issues/15)): nine 4032 × 3024 iPhone photos of the new cup and the ball inside a white box. Three problems were found and fixed:
+
+1. **One portrait photo cropped every frame.** `IMG_1026.JPG` has EXIF orientation 6, so after preprocessing it is 3024 × 4032 while the others are 4032 × 3024. DA3 then center-crops the whole batch to 378 × 378 without failing (`Images in batch have different sizes … center-cropping all to smallest`). Masks are resized over the full image, so every mask was misaligned with its depth. The results were a cup target with 34 % of all scene points, the cup scaled × 2.1, the ball × 11, and per-view sphere scales with 8 % CV. Now `scripts/run_da3.py` refuses mixed image sizes and names the odd files. `run_inference_weighted.py` refuses DA3 outputs whose aspect ratio differs from their images, and `sphere_metric_scale.py` marks such views unavailable.
+2. **Scale optimization inflated a far-placed object.** With the eight landscape photos, SAM 3D placed the ball 77 mm from its DA3 points. The target itself was correct: 46 × 48 × 44 mm, views agreeing within 6 mm. The optimizer grew the ball × 3.4 until its shell reached the target, instead of moving it. Now scale is held fixed for the first 100 iterations (`scale_warmup_iterations`), so rotation and translation converge first. Replaying the real ball: scale 0.118 → 0.111 (was 0.400), mean distance 1.2 mm.
+3. **The floor of a box corner was rejected.** The floor is only 14.5 % of DA3 points among walls, and it is split into near-parallel layers about 1 mm apart. The old rule needed 25 % of all points. Now the floor must have at least 10 % of points and 1.5 × the support of any non-parallel upward plane. It is refined over a 2 × tolerance band, and RANSAC uses 4000 samples instead of 256 (256 missed a 15 % floor about half the time). The object support check is unchanged.
+
+**Result with the eight landscape photos** (scale from the ball silhouette: **418.2 mm/DA3 unit, CV 2.1 %**; run exits 0 with grounded GLBs):
+
+| | Reconstructed | Measured | Error |
+| --- | ---: | ---: | ---: |
+| Cup height (vertical extent above the floor) | **108.3 mm** | 110 mm | −1.5 % |
+| Cup rim (horizontal extent) | 114.5 mm | 100 mm | +15 % |
+| Cup base (frustum fit) | 50.4 mm | 63 mm | −20 % |
+| Cup volume (frustum fit) | 530 mL | 521 mL | +2 % (rim and base errors cancel) |
+| Ball (axis-aligned extents) | 38.6–43.5 mm | 40 mm | within ±9 % |
+
+The absolute scale is now right to within a few percent. The remaining error is the **shape** of the SAM 3D cup: its rim flares too wide and its base is too narrow. A calibrated scale cannot fix that.
 
 ## Script
 

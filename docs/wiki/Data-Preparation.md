@@ -4,6 +4,8 @@
 
 > **Latest workflow:** the [SAM 3 text-only two-view run](SAM3-Two-View-Walkthrough) is now verified, using original views `0.png` and `2.png`, one cup, and seven visible bearings per image. Its [input bundle](assets/issue2-sam3-inputs.zip) is separate. The three-view inputs below belong to the earlier **SAM 1 box-prompted** experiment.
 
+> **Photo requirements for measurements:** use the original camera files (JPG, not HEIC), all in the **same orientation and size**. `scripts/run_da3.py` refuses a mixed set because DA3 would crop every frame. Include a reference sphere at least 40–50 px wide in every photo (for example a 40 mm ping-pong ball). See [Metric-Scale](Metric-Scale).
+
 ## Download the validated images and masks
 
 To reproduce the completed GPU experiment without creating masks again, download [issue2-inputs.zip](assets/issue2-inputs.zip) into the repository root.
