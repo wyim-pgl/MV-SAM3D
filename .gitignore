@@ -108,3 +108,9 @@ temp/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# Local recovery/validation outputs (published artifacts live in GitHub releases).
+/artifacts/
+
+# Agent tool cache.
+/.atl/
