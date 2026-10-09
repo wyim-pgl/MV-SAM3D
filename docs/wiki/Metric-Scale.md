@@ -123,10 +123,10 @@ Ruler measurements ([#16](https://github.com/wyim-pgl/MV-SAM3D/issues/16)):
 
 **Issue #9 check:** the grounded issue #9 cup was 100.3 mm tall at 368.7 mm/unit, which is **9 % short** of 110 mm. The capacity check above had predicted at least 6 %. The 8 mm bearing reference is too small to give a reliable absolute scale.
 
-**New photos** ([#15](https://github.com/wyim-pgl/MV-SAM3D/issues/15)): nine 4032 × 3024 iPhone photos of the new cup and the ball inside a white box. Three problems were found and fixed:
+**New photos** ([#15](https://github.com/wyim-pgl/MV-SAM3D/issues/15)): the supplied archive contained nine iPhone photos of the new cup and the ball inside a white box. **Correction from [#18](https://github.com/wyim-pgl/MV-SAM3D/issues/18): the student had already excluded the portrait image and used eight landscape photos in #15.** The mixed-orientation problem below was found in our separate nine-photo reproduction; it was not the cause of the student's eight-photo failure. The scale-optimization and floor-estimation problems affected the eight-photo run. All three fixes were merged in PR #17:
 
 1. **One portrait photo cropped every frame.** `IMG_1026.JPG` has EXIF orientation 6, so after preprocessing it is 3024 × 4032 while the others are 4032 × 3024. DA3 then center-crops the whole batch to 378 × 378 without failing (`Images in batch have different sizes … center-cropping all to smallest`). Masks are resized over the full image, so every mask was misaligned with its depth. The results were a cup target with 34 % of all scene points, the cup scaled × 2.1, the ball × 11, and per-view sphere scales with 8 % CV. Now `scripts/run_da3.py` refuses mixed image sizes and names the odd files. `run_inference_weighted.py` refuses DA3 outputs whose aspect ratio differs from their images, and `sphere_metric_scale.py` marks such views unavailable.
-2. **Scale optimization inflated a far-placed object.** With the eight landscape photos, SAM 3D placed the ball 77 mm from its DA3 points. The target itself was correct: 46 × 48 × 44 mm, views agreeing within 6 mm. The optimizer grew the ball × 3.4 until its shell reached the target, instead of moving it. Now scale is held fixed for the first 100 iterations (`scale_warmup_iterations`), so rotation and translation converge first. Replaying the real ball: scale 0.118 → 0.111 (was 0.400), mean distance 1.2 mm.
+2. **Scale optimization inflated a far-placed object.** With the eight landscape photos, SAM 3D placed the ball 77 mm from its DA3 points. The target itself was correct: 46 × 48 × 44 mm, views agreeing within 6 mm. The optimizer grew the ball × 3.4 until its shell reached the target, instead of moving it. Now scale is held fixed for the first 100 iterations (`scale_warmup_iterations`, capped at one third of the requested iterations), so rotation and translation converge first. Replaying the real ball: scale 0.118 → 0.111 (was 0.400), mean distance 1.2 mm.
 3. **The floor of a box corner was rejected.** The floor is only 14.5 % of DA3 points among walls, and it is split into near-parallel layers about 1 mm apart. The old rule needed 25 % of all points. Now the floor must have at least 10 % of points and 1.5 × the support of any non-parallel upward plane. It is refined over a 2 × tolerance band, and RANSAC uses 4000 samples instead of 256 (256 missed a 15 % floor about half the time). The object support check is unchanged.
 
 **Result with the eight landscape photos** (scale from the ball silhouette: **418.2 mm/DA3 unit, CV 2.1 %**; run exits 0 with grounded GLBs):
@@ -139,7 +139,48 @@ Ruler measurements ([#16](https://github.com/wyim-pgl/MV-SAM3D/issues/16)):
 | Cup volume (frustum fit) | 530 mL | 521 mL | +2 % (rim and base errors cancel) |
 | Ball (axis-aligned extents) | 38.6–43.5 mm | 40 mm | within ±9 % |
 
-The absolute scale is now right to within a few percent. The remaining error is the **shape** of the SAM 3D cup: its rim flares too wide and its base is too narrow. A calibrated scale cannot fix that.
+These historical measurements mix floor-axis bounds and frustum-fit estimates.
+They do **not** establish absolute size accuracy within a few percent. The
+remaining errors include cup shape and pose; a uniform scale cannot fix them.
+
+### Correction: tilted bounds are not intrinsic dimensions (#18, 2026-10-09)
+
+The student's rerun in [#18](https://github.com/wyim-pgl/MV-SAM3D/issues/18)
+successfully produced grounded outputs and reproduced the sphere scale
+(418.139 mm/DA3 unit, CV 2.1 %). The cup's estimated axis leaned **4.59°** from
+vertical. Re-measuring slices after aligning a *copy* to that axis gave:
+
+| Measurement | Along the estimated cup axis | Ruler | Error |
+| --- | ---: | ---: | ---: |
+| Height | 103.0 mm | 110 mm | −6.4 % |
+| Rim slice diameter | 108.7 mm | 100 mm | +8.7 % |
+| Base slice diameter | 58.6 mm | 63 mm | −7.0 % |
+
+The same run's floor-axis AABB height was 108.5 mm (−1.4 %). Tilt contributes
+to that bound, so it must not be presented as the intrinsic cup height. The
+earlier 50.4 mm base value was a frustum-fit estimate, not an AABB diameter;
+it also differs in method from the new slice estimate. Slice position, wall
+thickness and the fitted axis affect these measurements, so retain the method
+when reporting them. The slice estimates are diagnostics, not certified sizes.
+
+An independent re-measurement of the checksum-verified
+[published #15 GLB](https://github.com/wyim-pgl/MV-SAM3D/releases/tag/issue-15-pingpong-mm-20261007)
+using the same method gave a 4.39° lean, 103.17 mm own-axis height, and
+108.98/58.78 mm rim/base slice diameters. This is a different reconstruction
+from the student's #18 run, but confirms the same measurement distinction.
+
+Grounding rotates the common scene frame and translates each object to contact
+the floor; it does not upright the cup independently. Automatically rotating
+all objects upright would be inappropriate for objects that really lean.
+The JSON `aabb_mm` array is ordered **[X, Y, Z] in glTF coordinates** (Y-up for
+grounded scenes). Blender maps glTF Y to Z. PCA extents are not automatically
+height, rim diameter, and base diameter.
+
+CV 2.1 % measures agreement between reference views, **not absolute accuracy**.
+Likewise, a 530 mL fitted-frustum estimate close to 521 mL measured water
+capacity does not validate the reconstructed interior. Keep shape/pose accuracy
+tracked under [#13](https://github.com/wyim-pgl/MV-SAM3D/issues/13); distinguish
+#15's execution results and #16's physical measurements from accuracy validation.
 
 ## Script
 
@@ -178,4 +219,4 @@ Tests: `python -m unittest discover -s tests -p test_sphere_metric_scale.py -v` 
 - The scale is uniform. It cannot correct an object whose own shape or relative scale is wrong in the mesh (the cup rim above).
 - DA3 depth on a small, specular sphere is noisy; check the per-view coefficient of variation.
 - Mesh volume is not liquid capacity. Capacity needs an interior region and fill level.
-- Numbers on this page are computed from the issue #9 photos and outputs; none have been checked against a physical measurement yet.
+- Historical issue #9 estimates and the newer #15/#18 results are distinct runs. Physical measurements supplied in #16 now provide comparisons, but do not certify every dimension or scene. The script continues to set `physical_measurement_verified: false` because it does not perform that independent comparison itself.

@@ -12,10 +12,12 @@ This scale comes directly from the images and does not depend on the
 reconstructed reference mesh, its volume, or pose-optimization scale.
 """
 import argparse
+from contextlib import ExitStack
 import json
 import math
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from PIL import Image
@@ -292,14 +294,23 @@ def main(argv=None):
             report["glb"] = {"input": str(args.apply_to), "scaled_output": str(args.scaled_output),
                              "units": "mm", "assumes_glb_in_da3_frame": True,
                              "nodes": rows, "reference_check": reference}
-            temp_glb = args.scaled_output.with_name(args.scaled_output.name + ".tmp")
-            scene.export(temp_glb, file_type="glb")
-        temp_report = args.output.with_name(args.output.name + ".tmp")
-        temp_report.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n",
-                               encoding="utf-8")
-        if args.apply_to is not None:
-            temp_glb.replace(args.scaled_output)
-        temp_report.replace(args.output)
+        # Stage in exclusively created directories beside each destination.
+        # Predictable .tmp paths can be links to inputs; never open those paths.
+        # Prepare both files before publishing either, and clean up on failure.
+        with ExitStack() as staging:
+            if args.apply_to is not None:
+                glb_dir = staging.enter_context(TemporaryDirectory(
+                    dir=args.scaled_output.parent, prefix=".sphere-scale-"))
+                temp_glb = Path(glb_dir) / "scene.glb"
+                scene.export(temp_glb, file_type="glb")
+            report_dir = staging.enter_context(TemporaryDirectory(
+                dir=args.output.parent, prefix=".sphere-scale-"))
+            temp_report = Path(report_dir) / "report.json"
+            temp_report.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n",
+                                   encoding="utf-8")
+            if args.apply_to is not None:
+                temp_glb.replace(args.scaled_output)
+            temp_report.replace(args.output)
     except (ValueError, OSError, OverflowError) as exc:
         parser.error(str(exc))
     for row in report["views"]:

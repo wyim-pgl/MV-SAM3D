@@ -41,6 +41,35 @@ python run_inference_weighted.py \
 
 `--merge_da3_glb` remains optional for DA3-scene diagnostics. Grounding runs whether or not that flag is supplied. Optional pose optimization happens before final grounding; it is not itself a floor-contact constraint.
 
+## Check the candidate plane before reconstruction
+
+After DA3 finishes, use the same reconstruction environment to run:
+
+```bash
+python scripts/check_grounding.py \
+  --da3-output ./da3_outputs/ping-pong/da3_output.npz
+```
+
+This read-only check validates the DA3 prerequisites and runs the same plane
+estimator used by final grounding. It loads no reconstruction weights and runs
+no GPU inference. JSON is printed to stdout; exit status **0** means
+`plane_available`, **1** means invalid inputs or failed plane estimation, and
+**2** means invalid command-line arguments. Chain reconstruction with `&&` if
+it should only start after this check passes.
+
+The returned coefficients are in the **aligned DA3 scene frame**. The adjacent
+`scene.glb` already contains aligned geometry; do not apply its `hf_alignment`
+metadata again. A candidate plane is not independently verified, so do not copy
+it into `--ground_plane` merely to bypass a later automatic-grounding failure.
+
+**A pass is not a guarantee of final grounding.** Reconstructed object geometry
+and support distances are checked only after reconstruction. A floating or
+misplaced object can still fail those checks even when a plane was found. The
+report therefore always sets `final_grounding_verified: false`. It does not
+certify photo quality, physical floor identity, metric scale, or object shape.
+This formalizes the useful early plane check proposed in
+[#19](https://github.com/wyim-pgl/MV-SAM3D/issues/19).
+
 ## What grounding does
 
 The shared implementation is `sam3d_objects/pose_align/grounding.py`. It estimates an upward-facing dominant support plane from aligned DA3 scene geometry with RANSAC and SVD refinement. The automatic heuristic assumes a roughly upright reference camera; a dominant plane is not semantic proof of a floor or table.

@@ -167,6 +167,35 @@ class SphereScaleTests(unittest.TestCase):
             self.assertIn("must not overwrite", result.stderr)
         self.assertEqual(glb.read_bytes(), before)
 
+    def test_existing_temporary_links_cannot_overwrite_input(self):
+        import hashlib
+
+        glb = self.dir / "source.glb"
+        out, scaled = self.dir / "report.json", self.dir / "scaled.glb"
+        for output in (out, scaled):
+            for link_type in ("symlink", "hardlink"):
+                with self.subTest(output=output.name, link_type=link_type):
+                    out.unlink(missing_ok=True)
+                    scaled.unlink(missing_ok=True)
+                    trimesh.Scene(trimesh.creation.box()).export(glb)
+                    before = hashlib.sha256(glb.read_bytes()).hexdigest()
+                    temp = output.with_name(output.name + ".tmp")
+                    if link_type == "symlink":
+                        temp.symlink_to(glb)
+                    else:
+                        os.link(glb, temp)
+                    try:
+                        result = self.run_cli(
+                            "--apply-to", str(glb), "--scaled-output", str(scaled),
+                            "--output", str(out))
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(hashlib.sha256(glb.read_bytes()).hexdigest(), before)
+                        self.assertTrue(temp.exists(), "unrelated temp links must be untouched")
+                        self.assertTrue(scaled.is_file())
+                        self.assertIn("glb", json.loads(out.read_text()))
+                    finally:
+                        temp.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
