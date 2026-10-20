@@ -93,6 +93,51 @@ With scale fixed, the generated shape is unchanged: the cup remains about
 repair that shape ratio. Different seeds and new captures still need separate
 evaluation with a validated measurement method.
 
+## Full validation on 2026-10-20
+
+The complete test suite passed **193 tests with no skips**, including the
+opt-in CUDA memory stress test. The 27 warnings were existing dependency and
+Pillow deprecations. Independent review covered the coordinate contract,
+export/optimizer agreement, mask selection, reference calibration and the
+documented results. Source hashes matched the tested GPU-server snapshot.
+
+Two fresh neural reconstructions then ran on the preserved eight-photo scene,
+using seed 42, `--low_vram` and the same reference calibration:
+
+| Setting | Run suffix | Exit | Grounding | Cup height / rim extrapolation / base extrapolation |
+| --- | --- | ---: | --- | --- |
+| No pose optimization | `20261020_164056` | 0 | complete | 109.27 / 110.36 / 62.35 mm |
+| Pose and scale optimization | `20261020_164616` | 0 | complete | 105.85 / 106.85 / 60.35 mm |
+
+Both final GLBs were reopened and checked: exactly the cup and ball meshes,
+finite coordinates, and each object's minimum Y equal to zero. Both metric
+exports were reopened, their vertices checked against the scaled source, and
+archived with SHA-256 checksums. For the optimized run, saved `final_cd` equaled the minimum recorded
+distance at `best_iteration` for both objects (cup iteration 262, ball 185).
+
+The no-pose configuration now completes on this preserved capture, where the
+old camera-frame handling could cause implausible object support. This is not
+a claim that every capture will ground successfully. These fresh runs verify
+the complete pipeline; the fixed-mesh comparison above isolates code effects
+from neural generation variability. Neither table establishes the 5% target
+across independent captures.
+
+Reproduction commands, with paths replaced by the corresponding capture:
+
+```bash
+POSE_CUDA_STRESS=1 python -m pytest tests -q
+python run_inference_weighted.py --input_path data/ping-pong8 \
+  --mask_prompt red_cup,ball \
+  --da3_output da3_outputs/ping-pong8/da3_output.npz --low_vram --seed 42
+python run_inference_weighted.py --input_path data/ping-pong8 \
+  --mask_prompt red_cup,ball \
+  --da3_output da3_outputs/ping-pong8/da3_output.npz --low_vram --seed 42 \
+  --run_pose_optimization --pose_opt_optimize_scale
+```
+
+Large meshes, logs, source hashes and JSON verification reports are retained
+locally under `artifacts/dimensional-accuracy-20261020/` and are not committed.
+
 ## Updating existing runs
 
 Update the code, keep the source photographs/masks and original canonical
