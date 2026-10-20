@@ -271,7 +271,8 @@ class PoseOptimizer:
         → rotation (quaternion)
         → translation
         → PyTorch3D to CV
-        → alignment matrix
+        → reference camera to DA3 world
+        → world to aligned scene
         → aligned space
     """
     
@@ -289,7 +290,9 @@ class PoseOptimizer:
             canonical_mesh_path: Path to canonical mesh (result.glb)
             initial_pose: Initial pose with keys 'scale', 'rotation', 'translation'
             target_points: (N, 3) target point cloud in aligned space
-            alignment_matrix: (4, 4) hf_alignment matrix from DA3
+            alignment_matrix: (4, 4) reference-camera-to-scene transform:
+                hf_alignment @ inverse(DA3 extrinsics[0]). Raw hf_alignment
+                alone is only correct when the reference extrinsics is identity.
             device: 'cuda' or 'cpu'
             optimize_scale: If True, optimize scale; if False, keep scale fixed (default: False)
         """
@@ -298,20 +301,21 @@ class PoseOptimizer:
         
         # Load canonical mesh
         logger.info("Loading canonical mesh...")
-        sam3d_scene = trimesh.load(canonical_mesh_path)
-        
-        # Extract canonical vertices from GLB
-        if isinstance(sam3d_scene, trimesh.Scene):
-            source_vertices = None
-            for name, geom in sam3d_scene.geometry.items():
-                if hasattr(geom, 'vertices') and hasattr(geom, 'faces'):
-                    source_vertices = geom.vertices
-                    logger.info(f"  Found mesh: {name} ({len(source_vertices)} vertices)")
-                    break
-            if source_vertices is None:
-                raise ValueError("No mesh found in canonical GLB")
-        else:
-            source_vertices = sam3d_scene.vertices
+        sam3d_scene = trimesh.load(canonical_mesh_path, force='scene', process=False)
+
+        # Match the exporter: each mesh node is an instance, even when nodes
+        # share one geometry buffer. Its transform is part of canonical space.
+        mesh_points = []
+        for node in sam3d_scene.graph.nodes_geometry:
+            transform, key = sam3d_scene.graph[node]
+            geom = sam3d_scene.geometry[key]
+            if not isinstance(geom, trimesh.Trimesh) or not len(geom.faces) or not len(geom.vertices):
+                continue
+            mesh_points.append(trimesh.transform_points(geom.vertices, transform))
+            logger.info(f"  Found mesh: {node} ({len(geom.vertices)} vertices)")
+        if not mesh_points:
+            raise ValueError("No usable mesh found in canonical GLB")
+        source_vertices = np.concatenate(mesh_points)
         
         # Sample points from mesh
         if len(source_vertices) > 50000:
@@ -408,7 +412,7 @@ class PoseOptimizer:
         # 5. PyTorch3D to CV
         points = points @ self.p3d_to_cv.T
         
-        # 6. Apply alignment
+        # 6. Apply the composed reference-camera-to-scene transform.
         points_homo = torch.cat([points, torch.ones((len(points), 1), device=self.device)], dim=1)
         points = (self.alignment_matrix @ points_homo.T).T[:, :3]
         
@@ -471,11 +475,23 @@ class PoseOptimizer:
                 ball placed 77 mm away was scaled x3.4).
         
         Returns:
-            history: Dictionary with optimization history
+            history: Evaluated loss/CD/scale states (initial state first), plus
+                actual returned final_loss/final_cd and best_iteration. The
+                lowest-CD state is restored even if the iteration budget is
+                exhausted or early_stopping is disabled.
         """
+        if (isinstance(num_iterations, bool)
+                or not isinstance(num_iterations, (int, np.integer))
+                or num_iterations < 1):
+            raise ValueError('num_iterations must be a positive integer')
+        if not np.isfinite(lr) or lr <= 0:
+            raise ValueError('lr must be finite and positive')
+        if early_stopping and patience < 1:
+            raise ValueError('patience must be positive')
+        if scale_warmup_iterations < 0:
+            raise ValueError('scale_warmup_iterations must be nonnegative')
         # Adaptive learning rate based on initial CD
-        with torch.no_grad():
-            _, initial_cd = self.compute_loss()
+        loss, initial_cd = self.compute_loss()
         logger.info(f"  Initial CD: {initial_cd:.6f}")
         
         # If initial CD is very small, use smaller learning rates
@@ -511,14 +527,20 @@ class PoseOptimizer:
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedules)
         
         history = {
-            'loss': [],
-            'cd': [],
-            'scale': [],
+            'loss': [loss.item()],
+            'cd': [initial_cd],
+            'scale': [torch.exp(self.log_scale).item()],
         }
-        
-        # Early stopping variables
-        best_cd = float('inf')
-        best_params = None
+
+        def snapshot():
+            return {name: getattr(self, name).detach().clone()
+                    for name in ('log_scale', 'quat', 'translation')}
+
+        # A good initial pose must not be replaced by an overshooting update.
+        # Scores and snapshots always describe the same evaluated state.
+        best_cd = initial_cd
+        best_params = snapshot()
+        best_iteration = 0
         patience_counter = 0
         
         from tqdm import tqdm
@@ -531,42 +553,31 @@ class PoseOptimizer:
                 if warmup and i == warmup:
                     patience_counter = 0  # the scale phase starts its own patience window
                 optimizer.zero_grad()
-                loss, cd = self.compute_loss()
                 loss.backward()
                 if i < warmup:
                     self.log_scale.grad = None  # Adam skips parameters without gradients
                 optimizer.step()
                 scheduler.step()
-                
-                # Record
+
+                # Evaluate the update before recording or selecting it. This
+                # also considers the final update when the budget runs out.
+                loss, cd = self.compute_loss()
                 scale = torch.exp(self.log_scale).item()
                 history['loss'].append(loss.item())
                 history['cd'].append(cd)
                 history['scale'].append(scale)
                 
-                # Early stopping logic
-                if early_stopping:
-                    if cd < best_cd:
-                        best_cd = cd
-                        best_params = {
-                            'log_scale': self.log_scale.data.clone(),
-                            'quat': self.quat.data.clone(),
-                            'translation': self.translation.data.clone(),
-                        }
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                    
-                    if patience_counter >= patience and i >= warmup:
-                        logger.warning(f"  Early stopping at iteration {i} (no improvement for {patience} steps)")
-                        # Restore best parameters
-                        if best_params is not None:
-                            self.log_scale.data = best_params['log_scale']
-                            self.quat.data = best_params['quat']
-                            self.translation.data = best_params['translation']
-                            logger.info(f"  Restored best parameters (CD={best_cd:.6f})")
-                        pbar.update(num_iterations - i)
-                        break
+                if cd < best_cd:
+                    best_cd = cd
+                    best_params = snapshot()
+                    best_iteration = i + 1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                pbar.update(1)
+                if early_stopping and patience_counter >= patience and i >= warmup:
+                    logger.warning(f"  Early stopping at iteration {i} (no improvement for {patience} steps)")
+                    break
                 
                 if i % 10 == 0:
                     pbar.set_postfix({
@@ -574,9 +585,17 @@ class PoseOptimizer:
                         'cd': f'{cd:.6f}',
                         'scale': f'{scale:.4f}'
                     })
-                    pbar.update(10)
-        
-        logger.info(f"✓ Optimization finished. Final loss: {history['loss'][-1]:.6f}, Best CD: {best_cd:.6f}")
+
+        # Restore on both early stopping and normal completion. copy_ preserves
+        # the Parameter objects rather than replacing their storage via .data.
+        with torch.no_grad():
+            for name, value in best_params.items():
+                getattr(self, name).copy_(value)
+            final_loss, final_cd = self.compute_loss()
+        history.update(final_loss=final_loss.item(), final_cd=final_cd,
+                       best_iteration=best_iteration)
+        logger.info(f"✓ Optimization finished. Final loss: {history['final_loss']:.6f}, "
+                    f"Final CD: {final_cd:.6f}, selected iteration: {best_iteration}")
         
         return history
     

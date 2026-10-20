@@ -106,6 +106,53 @@ class PoseLossTests(unittest.TestCase):
         opt.optimize(num_iterations=60, lr=0.01, early_stopping=False)
         self.assertNotAlmostEqual(opt.log_scale.item(), start, places=4)
 
+    def make_near_target_optimizer(self):
+        # A one-point translation fit isolates the optimizer's state tracking.
+        # Its first Adam update overshoots the known 0.001-unit displacement.
+        opt = self.make_optimizer(source_count=9, target_count=9)
+        with torch.no_grad():
+            opt.source_canonical.zero_()
+            opt.translation.zero_()
+            opt.initial_translation.zero_()
+        opt.target_points = torch.tensor([[-0.001, 0., 0.]])
+        return opt
+
+    def test_early_stop_restores_the_parameters_that_were_scored(self):
+        opt = self.make_near_target_optimizer()
+        history = opt.optimize(num_iterations=10, lr=.01, patience=1)
+        loss, actual_cd = opt.compute_loss()
+        self.assertLessEqual(actual_cd, .0010001)
+        self.assertAlmostEqual(actual_cd, min(history['cd']), places=7)
+        self.assertAlmostEqual(history['final_cd'], actual_cd, places=7)
+        self.assertAlmostEqual(history['final_loss'], loss.item(), places=7)
+
+    def test_iteration_budget_also_restores_best_including_initial_pose(self):
+        for early_stopping in (False, True):
+            with self.subTest(early_stopping=early_stopping):
+                opt = self.make_near_target_optimizer()
+                history = opt.optimize(num_iterations=1, lr=.01,
+                                       early_stopping=early_stopping)
+                self.assertLessEqual(opt.compute_loss()[1], .0010001)
+                self.assertEqual(history['best_iteration'], 0)
+                torch.testing.assert_close(opt.translation, torch.zeros(3))
+
+    def test_final_update_is_evaluated_before_selecting_best(self):
+        opt = self.make_near_target_optimizer()
+        history = opt.optimize(num_iterations=1, lr=.0001)
+        actual_cd = opt.compute_loss()[1]
+        self.assertLess(actual_cd, .001)
+        self.assertAlmostEqual(actual_cd, min(history['cd']), places=7)
+        self.assertEqual(history['best_iteration'], 1)
+        self.assertEqual(len(history['cd']), 2)
+
+    def test_zero_iteration_budget_is_rejected_before_changing_pose(self):
+        opt = self.make_near_target_optimizer()
+        before = opt.get_optimized_pose()
+        with self.assertRaises(ValueError):
+            opt.optimize(num_iterations=0)
+        for key, expected in before.items():
+            np.testing.assert_array_equal(opt.get_optimized_pose()[key], expected)
+
     @unittest.skipUnless(os.environ.get('POSE_CUDA_STRESS') == '1' and torch.cuda.is_available(), 'opt-in CUDA stress test')
     def test_full_size_cuda_loss_and_backward_fit_256_mib(self):
         opt = self.make_optimizer(source_count=50000, target_count=100000, device='cuda')

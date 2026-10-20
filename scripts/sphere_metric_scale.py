@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - scipy is optional
 LIMITATIONS = [
     "Estimates only: no physical measurement has been verified by this tool.",
     "Assumes the reference is a sphere with the supplied diameter, and that its mask is the complete, unoccluded silhouette.",
-    "Accuracy depends on DA3 depth over the reference; small or specular references give biased depth and silhouettes. Prefer references at least --min-diameter-px wide.",
+    "Accuracy depends on DA3 depth over the reference; small or specular references give biased depth and silhouettes. Prefer references at least --min-diameter-px wide in both native masks and DA3 depth.",
     "Applying the scale to a GLB assumes that GLB is expressed in the same DA3 frame as the depth, with no additional scaling.",
     "The scale cannot correct reconstructed shape errors or independent per-object scale errors in the GLB.",
 ]
@@ -87,7 +87,8 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
     native_h, native_w = mask_native.shape
     area = int(mask_native.sum())
     row = {"area_px": area, "native_shape": [native_h, native_w],
-           "eq_diameter_px": None, "depth_median": None, "depth_iqr": None,
+           "eq_diameter_px": None, "native_eq_diameter_px": None,
+           "da3_eq_diameter_px": None, "depth_median": None, "depth_iqr": None,
            "diameter_da3": None, "scale_mm_per_da3_unit": None,
            "status": "unavailable", "reason": None, "warnings": []}
     if area == 0:
@@ -98,13 +99,17 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
                          "DA3 probably cropped a mixed-size batch - rerun DA3 on same-size images")
         return row
     eq_diameter_native = 2.0 * math.sqrt(area / math.pi)
+    # Keep the original field as a native-pixel compatibility alias.
     row["eq_diameter_px"] = eq_diameter_native
+    row["native_eq_diameter_px"] = eq_diameter_native
     sx, sy = width / native_w, height / native_h
     radius_px = 0.5 * eq_diameter_native * math.sqrt(sx * sy)
     mask = mask_native
     if mask.shape != depth.shape:
         mask = np.array(Image.fromarray(mask.astype(np.uint8) * 255)
                         .resize((width, height), Image.NEAREST)) > 127
+    eq_diameter_da3 = 2.0 * math.sqrt(int(mask.sum()) / math.pi)
+    row["da3_eq_diameter_px"] = eq_diameter_da3
     core = _erode(mask)
     if core.sum() < 3:
         core = mask
@@ -133,9 +138,10 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
         return row
     row["diameter_da3"] = diameter_da3
     row["scale_mm_per_da3_unit"] = diameter_mm / diameter_da3
-    if eq_diameter_native < min_diameter_px:
+    if min(eq_diameter_native, eq_diameter_da3) < min_diameter_px:
         row["status"] = "too_small"
-        row["reason"] = (f"reference is {eq_diameter_native:.1f} px wide, below "
+        row["reason"] = (f"reference is {eq_diameter_native:.1f} native px / "
+                         f"{eq_diameter_da3:.1f} DA3 px wide; both must meet "
                          f"--min-diameter-px {min_diameter_px:g}")
         row["warnings"].append(row["reason"])
     else:
@@ -146,7 +152,7 @@ def measure_view(mask_native, depth, intrinsics, diameter_mm, min_diameter_px):
 def estimate_scale(da3_output, mask_dir, diameter_mm, views=None, min_diameter_px=32.0,
                    allow_small=False, max_cv=0.10, allow_inconsistent=False):
     diameter_mm = _positive_finite(diameter_mm, "reference diameter (mm)")
-    min_diameter_px = float(min_diameter_px)
+    min_diameter_px = _positive_finite(min_diameter_px, "minimum diameter (px)")
     max_cv = _positive_finite(max_cv, "max CV")
     data = np.load(da3_output, allow_pickle=False)
     for key in ("depth", "intrinsics", "image_files"):
@@ -156,15 +162,28 @@ def estimate_scale(da3_output, mask_dir, diameter_mm, views=None, min_diameter_p
     names = [Path(str(name)).name for name in data["image_files"]]
     if depth.ndim != 3 or intrinsics.shape != (depth.shape[0], 3, 3) or len(names) != depth.shape[0]:
         raise ValueError("DA3 depth, intrinsics and image_files have inconsistent shapes")
+    stems = [Path(name).stem for name in names]
+    if len(stems) != len(set(stems)) or any(not stem for stem in stems):
+        raise ValueError("DA3 image names are ambiguous; image stems must be unique")
     count = depth.shape[0]
     indices = list(range(count)) if views is None else list(views)
+    if len(indices) != len(set(indices)):
+        raise ValueError("view indices must be unique")
     for index in indices:
         if not 0 <= index < count:
             raise ValueError(f"view index {index} outside 0..{count - 1}")
     mask_dir = Path(mask_dir)
+    selected_masks = [(index, find_mask(mask_dir, names[index]))
+                      for index in indices]
+    seen_masks = []
+    for index, mask_path in selected_masks:
+        if mask_path is None:
+            continue
+        if any(mask_path.samefile(previous) for previous in seen_masks):
+            raise ValueError(f"view {index} resolves to the same mask as another view: {mask_path}")
+        seen_masks.append(mask_path)
     rows = []
-    for index in indices:
-        mask_path = find_mask(mask_dir, names[index])
+    for index, mask_path in selected_masks:
         if mask_path is None:
             rows.append({"view": index, "image": names[index], "status": "unavailable",
                          "reason": f"no mask for {names[index]} in {mask_dir} "
@@ -255,7 +274,8 @@ def main(argv=None):
     parser.add_argument("--reference-diameter-mm", required=True, type=float,
                         help="Independently measured diameter of the spherical reference")
     parser.add_argument("--views", type=int, nargs="+")
-    parser.add_argument("--min-diameter-px", type=float, default=32.0)
+    parser.add_argument("--min-diameter-px", type=float, default=32.0,
+                        help="Minimum equivalent diameter in both native masks and DA3 depth")
     parser.add_argument("--allow-small", action="store_true")
     parser.add_argument("--max-cv", type=float, default=0.10)
     parser.add_argument("--allow-inconsistent", action="store_true")
