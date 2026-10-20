@@ -4,6 +4,74 @@
 
 MV-SAM3D outputs are **not in physical units**. DA3 depth and SAM 3D object scales are relative. To get millimetres, a reference of known size must be photographed in the same scene and the scale must be derived from it. This page records why the 8 mm bearing reference in [issue #9](https://github.com/wyim-pgl/MV-SAM3D/issues/9) gave wrong sizes and shapes, what was measured, and the procedure that gives a defensible size.
 
+## Comparing DA3 views in the same frame (issue #23)
+
+`da3_output.npz['pointmaps'][i]` contains points in **camera i's coordinate
+system**: x right, y down, z forward. `pointmaps_sam3d` stores the same
+coordinates in channel-first order; it is not a shared world point cloud.
+The earlier runner log incorrectly called these PyTorch3D coordinates.
+
+Before combining views or applying a plane estimated from `scene.glb`, use
+the world-to-camera extrinsics and the GLB's alignment metadata:
+
+```text
+p_world   = inverse(extrinsics[i]) @ p_camera
+p_aligned = hf_alignment @ p_world
+```
+
+These equations use homogeneous column vectors. Geometry loaded from
+`scene.glb` is already aligned (respect its node transforms); do not apply
+`hf_alignment` to it again. A floor normal estimated there cannot be applied
+directly to raw camera points.
+
+The supported diagnostic performs these conversions, matches masks by the
+NPZ's image filenames, and reports per-view and merged 1st–99th percentile
+heights as signed distances to the same floor plane:
+
+```bash
+python scripts/check_da3_geometry.py \
+  --da3-output da3_outputs/ping-pong/da3_output.npz \
+  --object-masks data/ping-pong/red_cup \
+  --mm-per-unit 420.126 > da3_cup_geometry.json
+```
+
+Use the scale from **that capture's** sphere calibration report; `420.126`
+is the value reported in issue #24, not a universal conversion. The command
+uses the adjacent `scene.glb` and existing floor estimator. An inspected
+plane can be supplied with `--ground-plane NX NY NZ D` in aligned scene
+coordinates, with its normal pointing toward the objects.
+
+Run in the reconstruction environment. No model inference is performed and
+inputs are unchanged. Masks must be PNG alpha masks or grayscale binary
+masks matching the uncropped source images. Missing/empty masks, ambiguous
+filenames, invalid transforms and invalid scale factors fail with exit 1.
+Only finite points with positive camera z are included; no depth-confidence
+filtering is applied.
+
+**Interpretation limits:** these are visible-surface spans along the floor
+normal, not cup own-axis heights or direct rim/base diameters. Different views
+see different surfaces, so even correctly transformed percentile bounds do
+not by themselves measure registration error. Establish correspondence or
+compare a common observed surface before attributing a spread to pose error.
+The 54 mm spread in issue #23 was computed before the necessary transforms
+and cannot establish the cause of the reconstructed rim error.
+
+For the mesh measurements in issues #22–#24, keep `rim_extrap` and
+`base_extrap` explicitly labeled as wall-fit extrapolations from 20–80 %
+height. A synthetic straight frustum validates that model but does not
+validate a rolled rim, an unseen base, or irregularly sampled reconstructed
+walls. Vertex means depend on tessellation. If slices are skipped, retain
+their actual height fractions when fitting; `fs[:len(dias)]` pairs the
+wrong heights with diameters after an interior slice is skipped.
+
+Repeating seeds on one capture measures conditional repeatability. It does
+not replace independent captures or validate the physical dimensions.
+Compare pose-only and pose-plus-scale with the **same seeds in both
+configurations**, then report the paired differences as well as absolute
+errors. The generated ball mesh does not set `sphere_metric_scale.py`'s
+mm/unit factor: the observed silhouette, DA3 depth/intrinsics and supplied
+physical diameter do.
+
 ## Summary
 
 | Problem | Measured cause | Consequence |

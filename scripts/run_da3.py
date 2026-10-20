@@ -119,7 +119,7 @@ def pointmap_to_sam3d_format(pointmap: np.ndarray) -> np.ndarray:
     Convert pointmap to SAM3D expected format.
     
     Args:
-        pointmap: (H, W, 3) pointmap in PyTorch3D coordinates
+        pointmap: (H, W, 3) pointmap in standard camera coordinates
         
     Returns:
         pointmap_sam3d: (3, H, W) pointmap ready for SAM3D
@@ -299,7 +299,7 @@ def run_da3_inference(
     np.savez(
         output_file,
         depth=depth,                          # (N, H, W)
-        pointmaps=pointmaps,                  # (N, H, W, 3) - PyTorch3D coords, for visualization
+        pointmaps=pointmaps,                  # (N, H, W, 3) - per-view standard camera coords
         pointmaps_sam3d=pointmaps_sam3d,      # (N, 3, H, W) - SAM3D format, ready to use
         extrinsics=extrinsics,                # (N, 3, 4) or (N, 4, 4)
         intrinsics=intrinsics,                # (N, 3, 3)
@@ -308,7 +308,7 @@ def run_da3_inference(
     )
     print(f"\nResults saved to: {output_file}")
     print(f"  - depth: {depth.shape}")
-    print(f"  - pointmaps: {pointmaps.shape} (PyTorch3D coords, for visualization)")
+    print(f"  - pointmaps: {pointmaps.shape} (per-view standard camera coordinates)")
     print(f"  - pointmaps_sam3d: {pointmaps_sam3d.shape} (SAM3D format, ready to use)")
     print(f"  - extrinsics: {extrinsics.shape}")
     print(f"  - intrinsics: {intrinsics.shape}")
