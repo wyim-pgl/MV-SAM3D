@@ -6,6 +6,13 @@ MV-SAM3D outputs are **not in physical units**. DA3 depth and SAM 3D object scal
 
 ## Comparing DA3 views in the same frame (issue #23)
 
+The reconstruction exporters and pose optimizer also require the reference
+camera's inverse extrinsics. See the repository's
+[dimensional-accuracy follow-up](https://github.com/wyim-pgl/MV-SAM3D/blob/main/docs/Dimensional-Accuracy.md)
+for the correction, migration of old runs and controlled before/after results.
+Reference-size checks now apply at both native and DA3 depth resolutions;
+reports include both diameters. This does not establish 5% physical accuracy.
+
 `da3_output.npz['pointmaps'][i]` contains points in **camera i's coordinate
 system**: x right, y down, z forward. `pointmaps_sam3d` stores the same
 coordinates in channel-first order; it is not a shared world point cloud.
@@ -122,7 +129,7 @@ The cup was measured directly from DA3 points and silhouettes, multiplied by the
 | Previous approach: cup ÷ bearing mesh, original GLB | 110.7 | 116.9 | 63.8 |
 | Previous approach: cup ÷ bearing mesh, optimized GLB | 62.0 | 65.5 | 35.8 |
 
-The best photo-based estimate is **height ≈ 99–104 mm, rim ≈ 85–94 mm, base ≈ 57–62 mm**. The grounded SAM 3D cup is 100.3 mm tall, which agrees, but 111 mm wide at the rim, which is too wide (the shape distortion noted above). Fusing all three DA3 views into one frustum fit failed (35 % residual), which indicates the three DA3 camera poses disagree by several centimetres; per-view numbers are therefore reported separately. **The physical cup must be measured with a ruler to validate these numbers.**
+The photo-based estimates at that stage were **height ≈ 99–104 mm, rim ≈ 85–94 mm, base ≈ 57–62 mm**. Fusing all three DA3 views into one frustum fit gave a 35 % residual, so per-view numbers were reported separately. **Correction:** this residual alone does not establish centimetre-scale camera-pose errors; coordinate consistency, visible-surface coverage and the frustum assumption must first be checked. Agreement with a generated mesh also does not validate these estimates. The later physical measurements and accuracy corrections below supersede that interpretation.
 
 ### Product identification and capacity check (2026-10-05)
 

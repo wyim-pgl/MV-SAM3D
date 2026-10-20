@@ -125,6 +125,27 @@ OPENCV_TO_PYTORCH3D = PYTORCH3D_TO_OPENCV.copy()
 # Core Transform Functions
 # =============================================================================
 
+def da3_camera_to_scene(hf_alignment: np.ndarray, extrinsics: np.ndarray) -> np.ndarray:
+    """Map standard camera-local points into the aligned DA3 GLB frame.
+
+    DA3 extrinsics map world to camera; hf_alignment maps world to scene.
+    SAM3D's decoded pose is in its first input camera, so its points need
+    ``hf_alignment @ inverse(extrinsics[0])`` after the PyTorch3D-to-CV flip.
+    Pass one view's 3x4 or 4x4 extrinsics here. Raw world points still use
+    hf_alignment alone. Identity extrinsics preserve the existing transform.
+    """
+    alignment = np.asarray(hf_alignment, dtype=float)
+    camera = np.asarray(extrinsics, dtype=float)
+    if camera.shape == (3, 4):
+        camera = np.vstack([camera, [0, 0, 0, 1]])
+    for name, matrix in (('hf_alignment', alignment), ('extrinsics', camera)):
+        if (matrix.shape != (4, 4) or not np.isfinite(matrix).all()
+                or not np.allclose(matrix[3], [0, 0, 0, 1])
+                or abs(np.linalg.det(matrix[:3, :3])) < 1e-10):
+            raise ValueError(f'{name} must be a finite, invertible affine matrix')
+    return alignment @ np.linalg.inv(camera)
+
+
 def canonical_to_pytorch3d(coords: np.ndarray) -> np.ndarray:
     """
     Transform coordinates from SAM3D canonical space (Z-up) to PyTorch3D space (Y-up).

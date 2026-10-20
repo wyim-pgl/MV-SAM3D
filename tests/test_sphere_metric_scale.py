@@ -110,6 +110,79 @@ class SphereScaleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no usable"):
             sms.estimate_scale(npz, masks, 8.0)
 
+    def test_downsampled_reference_must_be_large_in_da3_depth(self):
+        # A 40 px native silhouette becomes only 12 selected depth pixels
+        # after 10x downsampling. Native resolution alone must not admit it.
+        yy, xx = np.mgrid[:400, :400]
+        mask = (xx - 199.5) ** 2 + (yy - 199.5) ** 2 < 20 ** 2
+        masks = self.dir / "masks"
+        masks.mkdir()
+        Image.fromarray(mask.astype(np.uint8) * 255).save(masks / "0.png")
+        intrinsics = np.array([[40., 0, 20], [0, 40., 20], [0, 0, 1]])
+        npz = self.dir / "downsampled.npz"
+        np.savez(npz, depth=np.ones((1, 40, 40)),
+                 intrinsics=intrinsics[None], image_files=["images/0.jpg"])
+        with self.assertRaisesRegex(ValueError, "no usable"):
+            sms.estimate_scale(npz, masks, 40.0)
+        report = sms.estimate_scale(npz, masks, 40.0, allow_small=True)
+        row = report["views"][0]
+        self.assertEqual(row["status"], "too_small")
+        self.assertAlmostEqual(row["native_eq_diameter_px"], 40.117, delta=.001)
+        self.assertAlmostEqual(row["da3_eq_diameter_px"], 3.909, delta=.001)
+        self.assertEqual(row["eq_diameter_px"], row["native_eq_diameter_px"])
+        self.assertIn("DA3", row["reason"])
+        self.assertEqual(report["views_used"], [0])
+
+    def test_ambiguous_image_stems_are_refused(self):
+        npz, masks = self.write([[0, 0, .6], [0, 0, .6]])
+        data = dict(np.load(npz))
+        for names in (("a/0.jpg", "b/0.jpg"),
+                      ("images/0.jpg", "images/0.png")):
+            with self.subTest(names=names):
+                data["image_files"] = np.array(names)
+                np.savez(npz, **data)
+                with self.assertRaisesRegex(ValueError, "ambiguous"):
+                    sms.estimate_scale(npz, masks, 8.0)
+
+    def test_distinct_image_names_cannot_reuse_one_mask(self):
+        npz, masks = self.write([[0, 0, .6], [0, 0, .6]])
+        data = dict(np.load(npz))
+        data["image_files"] = np.array(["images/0.jpg", "images/0_mask.jpg"])
+        np.savez(npz, **data)
+        (masks / "0.png").rename(masks / "0_mask.png")
+        with self.assertRaisesRegex(ValueError, "same mask"):
+            sms.estimate_scale(npz, masks, 8.0)
+
+    def test_mask_file_aliases_cannot_count_as_independent_views(self):
+        npz, masks = self.write([[0, 0, .6], [0, 0, .6]])
+        for link_type in ("symlink", "hardlink"):
+            with self.subTest(link_type=link_type):
+                (masks / "1.png").unlink()
+                if link_type == "symlink":
+                    (masks / "1.png").symlink_to(masks / "0.png")
+                else:
+                    os.link(masks / "0.png", masks / "1.png")
+                with self.assertRaisesRegex(ValueError, "same mask"):
+                    sms.estimate_scale(npz, masks, 8.0)
+
+    def test_repeated_view_indices_are_refused(self):
+        npz, masks = self.write([[0, 0, .6], [0, 0, .8]])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            sms.estimate_scale(npz, masks, 8.0, views=[0, 0])
+
+    def test_invalid_minimum_diameter_is_refused(self):
+        npz, masks = self.write([[0, 0, 3.0]])
+        for bad in (0, -1, float("nan"), float("inf"), True):
+            with self.subTest(minimum=bad):
+                with self.assertRaisesRegex(ValueError, "positive and finite"):
+                    sms.estimate_scale(npz, masks, 8.0, min_diameter_px=bad)
+
+    def test_cli_nan_minimum_fails_without_publishing_report(self):
+        output = self.dir / "report.json"
+        result = self.run_cli("--min-diameter-px", "nan", "--output", str(output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
     def test_inconsistent_views_refused(self):
         npz, masks = self.write([[0, 0, 0.6], [0, 0, 0.8]])
         data = dict(np.load(npz))

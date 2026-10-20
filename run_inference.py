@@ -324,6 +324,7 @@ def run_inference(
     merged_path = merge_glb_with_da3_aligned(
         output_dir / "result.glb", da3_path.parent, pose,
         output_path=output_dir / "result_merged_scene.glb",
+        da3_output_path=da3_path,
     )
     if merged_path is None or not Path(merged_path).is_file():
         raise RuntimeError("Failed to align the reconstructed object with the DA3 scene")

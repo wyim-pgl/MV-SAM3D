@@ -66,6 +66,7 @@ from sam3d_objects.utils.coordinate_transforms import (
     apply_sam3d_pose_to_mesh_vertices,
     apply_sam3d_pose_to_latent_coords,
     canonical_to_pytorch3d,
+    da3_camera_to_scene,
 )
 from pytorch3d.transforms import Transform3d, quaternion_to_matrix
 from sam3d_objects.pose_align.grounding import (
@@ -73,11 +74,66 @@ from sam3d_objects.pose_align.grounding import (
 )
 
 
+def load_pose_optimization_inputs(input_path, mask_prompt, da3_output_path):
+    """Load masks and reference-camera-to-scene transform for one DA3 capture.
+
+    A shared image/mask directory uses only ``<stem>_mask`` files. Dedicated
+    object folders also accept ``<stem>`` masks, as the inference loader does.
+    Missing or ambiguous inputs fail before inference instead of changing the
+    pose target through filename, view-order, or identity-transform fallbacks.
+    """
+    from load_images_and_masks import load_mask_from_rgba
+    import trimesh
+
+    da3_npz_path = Path(da3_output_path)
+    da3_scene_glb = da3_npz_path.parent / "scene.glb"
+    with np.load(da3_npz_path, allow_pickle=False) as data:
+        if any(key not in data for key in ('depth', 'image_files', 'extrinsics', 'intrinsics')):
+            raise ValueError('Pose optimization requires DA3 depth, image_files, extrinsics, and intrinsics')
+        depth, files, extrinsics = data['depth'], data['image_files'], data['extrinsics']
+        if (depth.ndim != 3 or files.ndim != 1 or not len(files)
+                or len(files) != len(depth)):
+            raise ValueError('DA3 image_files must match the depth view count')
+        if extrinsics.shape not in ((len(files), 3, 4), (len(files), 4, 4)):
+            raise ValueError('DA3 extrinsics must match the depth view count')
+        intrinsics = data['intrinsics']
+        if (intrinsics.shape != (len(files), 3, 3)
+                or not np.isfinite(intrinsics).all()
+                or np.any(intrinsics[:, 0, 0] <= 0)
+                or np.any(intrinsics[:, 1, 1] <= 0)
+                or np.any(np.abs(np.linalg.det(intrinsics)) < 1e-10)):
+            raise ValueError('DA3 intrinsics must be finite, invertible (N,3,3) matrices with positive fx/fy')
+        names = [Path(str(name)).stem for name in files]
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError('DA3 image names are ambiguous')
+
+    mask_dir = Path(input_path) if mask_prompt is None else Path(input_path) / mask_prompt
+    masks = []
+    for name in names:
+        candidates = [mask_dir / f'{name}_mask.png', mask_dir / f'{name}_mask.jpg']
+        if mask_prompt is not None:
+            candidates.extend([mask_dir / f'{name}.png', mask_dir / f'{name}.jpg'])
+        matches = [path for path in candidates if path.is_file()]
+        if not matches:
+            raise FileNotFoundError(f'No pose-optimization mask for {name!r} in {mask_dir}')
+        if len(matches) != 1:
+            raise ValueError(f'Pose-optimization masks are ambiguous for {name!r}: {matches}')
+        mask = load_mask_from_rgba(matches[0]).astype(np.uint8) * 255
+        masks.append(mask)
+        logger.info(f"[Pose Optimization] {name}: mask {matches[0]}, shape={mask.shape}")
+
+    scene = trimesh.load(da3_scene_glb, force='scene', process=False)
+    camera_to_scene = da3_camera_to_scene(
+        scene.metadata.get('hf_alignment', []), extrinsics[0])
+    return da3_npz_path, da3_scene_glb, masks, camera_to_scene
+
+
 def merge_glb_with_da3_aligned(
     sam3d_glb_path: Path, 
     da3_output_dir: Path,
     sam3d_pose: dict,
-    output_path: Optional[Path] = None
+    output_path: Optional[Path] = None,
+    da3_output_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """
     Merge SAM3D reconstructed object with DA3's full scene GLB (aligned).
@@ -92,13 +148,19 @@ def merge_glb_with_da3_aligned(
     1. canonical (Z-up) -> Y-up rotation
     2. Apply SAM3D pose -> PyTorch3D camera space
     3. PyTorch3D -> CV camera space: (-x, -y, z) -> (x, y, z)
-    4. Apply DA3's alignment matrix A (from scene.glb metadata)
+    4. View 0 camera -> DA3 world using inverse(extrinsics[0])
+    5. Apply DA3's world-to-scene alignment A (from scene.glb metadata)
+
+    Historical optimized poses fitted through the old camera/world mismatch
+    must be recomputed from their original poses before using this exporter.
     
     Args:
         sam3d_glb_path: SAM3D output GLB file path (canonical space)
         da3_output_dir: DA3 output directory containing scene.glb
         sam3d_pose: SAM3D pose parameters {'scale', 'rotation', 'translation'}
         output_path: Output path
+        da3_output_path: Exact selected NPZ; defaults to da3_output_dir/da3_output.npz.
+            Its companion scene.glb supplies the matching world-to-scene alignment.
     
     Returns:
         Aligned GLB file path
@@ -114,8 +176,9 @@ def merge_glb_with_da3_aligned(
         return None
     
     # Find DA3's scene.glb
-    da3_scene_glb = da3_output_dir / "scene.glb"
-    da3_npz = da3_output_dir / "da3_output.npz"
+    da3_npz = (Path(da3_output_path) if da3_output_path is not None
+               else Path(da3_output_dir) / "da3_output.npz")
+    da3_scene_glb = da3_npz.parent / "scene.glb"
     
     if not da3_scene_glb.exists():
         logger.warning(f"DA3 scene.glb not found: {da3_scene_glb}")
@@ -127,63 +190,23 @@ def merge_glb_with_da3_aligned(
     
     try:
         # Load SAM3D GLB
-        sam3d_scene = trimesh.load(str(sam3d_glb_path))
+        sam3d_scene = trimesh.load(str(sam3d_glb_path), force='scene', process=False)
         
         # Load DA3 scene.glb
-        da3_scene = trimesh.load(str(da3_scene_glb))
-        
-        # Try to read alignment matrix from DA3 scene metadata
-        alignment_matrix = None
-        if hasattr(da3_scene, 'metadata') and da3_scene.metadata is not None:
-            alignment_matrix = da3_scene.metadata.get('hf_alignment', None)
-        
-        if alignment_matrix is None:
-            logger.warning("DA3 scene.glb does not contain alignment matrix (hf_alignment)")
-            logger.warning("Falling back to computing alignment from extrinsics")
-            
-            # Fallback: compute alignment from extrinsics
-            if not da3_npz.exists():
-                logger.warning(f"DA3 da3_output.npz not found: {da3_npz}")
-                return None
-            
-            da3_data = np.load(da3_npz)
-            da3_extrinsics = da3_data["extrinsics"]
-            
-            # Get first frame w2c
-            w2c0 = da3_extrinsics[0]
-            if w2c0.shape == (3, 4):
-                w2c0_44 = np.eye(4, dtype=np.float64)
-                w2c0_44[:3, :4] = w2c0
-                w2c0 = w2c0_44
-            
-            # CV -> glTF coordinate transform
-            M_cv_to_gltf = np.eye(4, dtype=np.float64)
-            M_cv_to_gltf[1, 1] = -1.0
-            M_cv_to_gltf[2, 2] = -1.0
-            
-            # Compute alignment matrix (without centering)
-            A_no_center = M_cv_to_gltf @ w2c0
-            
-            # Get point cloud center from DA3 scene
-            da3_points = []
-            if isinstance(da3_scene, trimesh.Scene):
-                for geom in da3_scene.geometry.values():
-                    if hasattr(geom, 'vertices'):
-                        da3_points.append(geom.vertices)
-            elif hasattr(da3_scene, 'vertices'):
-                da3_points.append(da3_scene.vertices)
-            
-            if da3_points:
-                all_pts = np.vstack(da3_points)
-                # DA3 scene is already centered
-                # Since it is centered, center should be near 0
-                # We need to compute original centering offset
-                # This is complex, assume centering offset is 0 for now
-                alignment_matrix = A_no_center
-                logger.warning("Using alignment without centering (may be slightly off)")
-        
-        logger.info(f"[Merge Scene] Alignment matrix:\n{alignment_matrix}")
-        
+        da3_scene = trimesh.load(str(da3_scene_glb), force='scene', process=False)
+
+        # The predicted pose is local to the first input camera. The GLB
+        # alignment consumes DA3 world points, so undo that camera extrinsic.
+        with np.load(da3_npz, allow_pickle=False) as data:
+            if 'extrinsics' not in data:
+                raise ValueError('DA3 NPZ requires extrinsics for aligned export')
+            extrinsics = data['extrinsics']
+            if extrinsics.ndim != 3 or not len(extrinsics):
+                raise ValueError('DA3 extrinsics must contain a reference camera')
+            camera_to_scene = da3_camera_to_scene(
+                da3_scene.metadata.get('hf_alignment', []), extrinsics[0])
+        logger.info(f"[Merge Scene] Camera-to-scene matrix:\n{camera_to_scene}")
+
         # Extract SAM3D pose parameters
         scale = sam3d_pose.get('scale', np.array([1.0, 1.0, 1.0]))
         rotation_quat = sam3d_pose.get('rotation', np.array([1.0, 0.0, 0.0, 0.0]))  # wxyz
@@ -243,8 +266,8 @@ def merge_glb_with_da3_aligned(
             # Step 3: PyTorch3D -> CV camera space
             pts_cv = pts_p3d @ p3d_to_cv.T
             
-            # Step 4: Apply DA3 alignment matrix
-            pts_final = trimesh.transform_points(pts_cv, alignment_matrix)
+            # Step 4: Reference camera -> DA3 world -> aligned scene.
+            pts_final = trimesh.transform_points(pts_cv, camera_to_scene)
             
             return pts_final
         
@@ -256,23 +279,29 @@ def merge_glb_with_da3_aligned(
         
         # Add DA3 scene (keep as-is, already in correct coordinate system)
         if isinstance(da3_scene, trimesh.Scene):
-            for name, geom in da3_scene.geometry.items():
-                merged_scene.add_geometry(geom.copy(), node_name=f"da3_{name}")
+            for node in da3_scene.graph.nodes_geometry:
+                transform, key = da3_scene.graph[node]
+                merged_scene.add_geometry(da3_scene.geometry[key].copy(),
+                                          node_name=f"da3_{node}", transform=transform)
         else:
             merged_scene.add_geometry(da3_scene.copy(), node_name="da3_scene")
         
         # Transform and add SAM3D object
         sam3d_vertices_final = None
         if isinstance(sam3d_scene, trimesh.Scene):
-            for name, geom in sam3d_scene.geometry.items():
+            for node in sam3d_scene.graph.nodes_geometry:
+                transform, key = sam3d_scene.graph[node]
+                geom = sam3d_scene.geometry[key]
                 if hasattr(geom, 'vertices'):
                     geom_copy = geom.copy()
+                    geom_copy.apply_transform(transform)
                     geom_copy.vertices = transform_sam3d_to_da3_space(geom_copy.vertices)
-                    merged_scene.add_geometry(geom_copy, node_name=f"sam3d_{name}")
+                    merged_scene.add_geometry(geom_copy, node_name=f"sam3d_{node}")
                     if sam3d_vertices_final is None:
                         sam3d_vertices_final = geom_copy.vertices
                 else:
-                    merged_scene.add_geometry(geom, node_name=f"sam3d_{name}")
+                    merged_scene.add_geometry(geom.copy(), node_name=f"sam3d_{node}",
+                                              transform=transform)
         else:
             if hasattr(sam3d_scene, 'vertices'):
                 sam3d_scene_copy = sam3d_scene.copy()
@@ -455,30 +484,13 @@ def visualize_multiview_pose_consistency(
             # Step 3: PyTorch3D -> CV camera space
             pts_cv = pts_p3d @ p3d_to_cv.T
             
-            # Step 4: View i camera space -> world coordinates
-            w2c_i = da3_extrinsics[view_idx]
-            if w2c_i.shape == (3, 4):
-                w2c_i_44 = np.eye(4, dtype=np.float64)
-                w2c_i_44[:3, :4] = w2c_i
-                w2c_i = w2c_i_44
-            c2w_i = np.linalg.inv(w2c_i)
-            pts_world = trimesh.transform_points(pts_cv, c2w_i)
-            
-            # Step 5: World coordinates -> glTF coordinates
-            pts_gltf = trimesh.transform_points(pts_world, M_cv_to_gltf)
-            
-            # Step 6: Apply centering offset if alignment matrix exists
-            if alignment_matrix is not None and view_idx == 0:
-                # Use View 0 to compute centering offset
-                # Apply alignment_matrix to View 0 CV space points
-                pts_aligned_v0 = trimesh.transform_points(pts_cv, alignment_matrix)
-                center_offset = pts_aligned_v0.mean(axis=0) - pts_gltf.mean(axis=0)
-            
-            if alignment_matrix is not None:
-                pts_final = pts_gltf + center_offset
-            else:
-                pts_final = pts_gltf
-            
+            # Each decoded pose is camera-local. Map that camera directly
+            # into the same aligned scene as the DA3 background.
+            world_to_scene = (alignment_matrix if alignment_matrix is not None
+                              else M_cv_to_gltf)
+            camera_to_scene = da3_camera_to_scene(world_to_scene, da3_extrinsics[view_idx])
+            pts_final = trimesh.transform_points(pts_cv, camera_to_scene)
+
             # Filter invalid points
             valid = np.isfinite(pts_final).all(axis=1)
             pts_final = pts_final[valid]
@@ -2753,6 +2765,11 @@ def run_weighted_inference(
         logger.info(f"  Successfully loaded and matched {len(view_pointmaps)} external pointmaps from DA3")
         check_da3_aspect(view_images, view_pointmaps, inference_image_names)
     
+    # Validate every pose target view before inference, outside the optional
+    # optimization block's error handling. Never silently skip a bad mask.
+    pose_inputs = (load_pose_optimization_inputs(input_path, mask_prompt, da3_path)
+                   if run_pose_optimization else None)
+
     is_single_view = num_views == 1
     
     if is_single_view:
@@ -3215,7 +3232,7 @@ def run_weighted_inference(
             if sam3d_pose:
                 # Merge with DA3's complete scene.glb
                 merged_path = merge_glb_with_da3_aligned(
-                    glb_path, da3_dir, sam3d_pose
+                    glb_path, da3_dir, sam3d_pose, da3_output_path=da3_path
                 )
                 if merged_path:
                     saved_files.append(merged_path.name)
@@ -3611,75 +3628,8 @@ def run_weighted_inference(
                     widest_mask_diameter_px,
                 )
                 
-                # Prepare paths
-                da3_npz_path = str(da3_dir / "da3_output.npz")
-                da3_scene_glb = da3_dir / "scene.glb"
-                
-                # Load ALL masks from mask directory (not just inference masks)
-                # This ensures pose optimization uses complete point cloud from all views
-                masks = []
-                da3_data_for_masks = np.load(da3_npz_path)
-                num_da3_frames = da3_data_for_masks['depth'].shape[0]
-                
-                # Get DA3 image order for matching
-                da3_image_names = []
-                if "image_files" in da3_data_for_masks:
-                    da3_image_names = [Path(str(f)).stem for f in da3_data_for_masks["image_files"]]
-                else:
-                    # Fallback to numeric order
-                    da3_image_names = [str(i) for i in range(num_da3_frames)]
-                
-                logger.info(f"[Pose Optimization] Loading ALL {num_da3_frames} masks for complete point cloud extraction")
-                logger.info(f"  DA3 frame order: {da3_image_names}")
-                
-                # Determine mask directory
-                if mask_prompt:
-                    mask_dir = input_path / mask_prompt
-                else:
-                    mask_dir = input_path  # masks are in same dir with _mask suffix
-                
-                logger.info(f"  Loading masks from: {mask_dir}")
-                
-                for frame_idx, frame_name in enumerate(da3_image_names):
-                    mask_loaded = False
-                    
-                    # Try different mask file patterns
-                    mask_candidates = [
-                        mask_dir / f"{frame_name}.png",
-                        mask_dir / f"{frame_name}_mask.png",
-                        mask_dir / f"{frame_name}.jpg",
-                        mask_dir / f"{frame_name}_mask.jpg",
-                    ]
-                    
-                    for mask_path in mask_candidates:
-                        if mask_path.exists():
-                            try:
-                                from PIL import Image
-                                mask_img = Image.open(mask_path)
-                                mask_array = np.array(mask_img)
-                                
-                                # Extract mask from RGBA alpha channel or use as-is
-                                if mask_img.mode == 'RGBA' and mask_array.ndim == 3 and mask_array.shape[2] >= 4:
-                                    mask_np = (mask_array[..., 3] > 0).astype(np.uint8) * 255
-                                elif mask_array.ndim == 2:
-                                    mask_np = mask_array.astype(np.uint8)
-                                else:
-                                    mask_np = mask_array[..., 0].astype(np.uint8) if mask_array.ndim == 3 else mask_array.astype(np.uint8)
-                                
-                                masks.append(mask_np)
-                                logger.info(f"  Frame {frame_idx} ({frame_name}): loaded from {mask_path.name}, shape={mask_np.shape}")
-                                mask_loaded = True
-                                break
-                            except Exception as e:
-                                logger.warning(f"  Frame {frame_idx} ({frame_name}): failed to load {mask_path.name}: {e}")
-                    
-                    if not mask_loaded:
-                        masks.append(None)
-                        logger.warning(f"  Frame {frame_idx} ({frame_name}): no mask found, will skip this view")
-                
-                valid_masks = [m for m in masks if m is not None]
-                logger.info(f"[Pose Optimization] Loaded {len(valid_masks)}/{num_da3_frames} masks for pose optimization")
-                
+                da3_npz_path, da3_scene_glb, masks, alignment_matrix = pose_inputs
+
                 # Extract target point cloud from DA3 scene
                 logger.info("\n[Pose Optimization] Extracting target point cloud from DA3 scene...")
                 target_points = extract_object_pointcloud_from_scene(
@@ -3697,16 +3647,6 @@ def run_weighted_inference(
                     logger.error("[Pose Optimization] Failed to extract target point cloud")
                 else:
                     logger.info(f"  Extracted {len(target_points)} target points")
-                    
-                    # Load DA3 alignment matrix
-                    try:
-                        import trimesh
-                        da3_scene = trimesh.load(str(da3_scene_glb))
-                        alignment_matrix = np.array(da3_scene.metadata.get('hf_alignment', np.eye(4)))
-                        logger.info(f"  Loaded alignment matrix from DA3 scene.glb")
-                    except Exception as e:
-                        logger.error(f"[Pose Optimization] Failed to load alignment matrix: {e}")
-                        alignment_matrix = np.eye(4)
                     
                     # Prepare initial pose
                     initial_pose = {
@@ -3759,9 +3699,13 @@ def run_weighted_inference(
                     final_pose = optimizer.get_optimized_pose()
                     
                     logger.info(f"\n[Pose Optimization] Optimization complete!")
-                    logger.info(f"  Final loss: {history['loss'][-1]:.6f}")
+                    logger.info(f"  Final loss: {history['final_loss']:.6f}")
                     logger.info(f"  Initial loss: {history['loss'][0]:.6f}")
-                    logger.info(f"  Improvement: {100 * (1 - history['loss'][-1] / history['loss'][0]):.2f}%")
+                    if history['loss'][0] > 0:
+                        improvement = 100 * (1 - history['final_loss'] / history['loss'][0])
+                        logger.info(f"  Improvement: {improvement:.2f}%")
+                    else:
+                        logger.info("  Improvement: undefined (initial loss is zero)")
                     
                     logger.info(f"\n[Pose Optimization] Optimized pose:")
                     logger.info(f"  scale: {final_pose['scale']}")
@@ -3780,6 +3724,9 @@ def run_weighted_inference(
                         'loss_history': np.array(history['loss']),
                         'cd_history': np.array(history['cd']),
                         'scale_history': np.array(history['scale']),
+                        'final_loss': history['final_loss'],
+                        'final_cd': history['final_cd'],
+                        'best_iteration': history['best_iteration'],
                         'initial_pose': {
                             'scale': initial_pose['scale'],
                             'rotation': initial_pose['rotation'],
@@ -3820,7 +3767,8 @@ def run_weighted_inference(
                             optimized_glb_path,  # Canonical GLB
                             da3_dir,
                             optimized_sam3d_pose,  # Optimized pose to apply
-                            output_path=output_dir / "result_merged_scene_optimized.glb"
+                            output_path=output_dir / "result_merged_scene_optimized.glb",
+                            da3_output_path=da3_path,
                         )
                         
                         if merged_optimized_path:
