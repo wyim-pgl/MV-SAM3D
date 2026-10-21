@@ -4,6 +4,10 @@ The October 2026 cup experiments exposed errors in the analysis and in the
 placement/optimization path. The corrections below remove those errors; they
 do not make generated meshes metrology-grade or establish a general 5% bound.
 
+For the current work order and commands, start with
+[Measurement next steps](Measurement-Next-Steps.md). The sections below explain
+the fixes and historical validation results.
+
 ## Coordinate contract
 
 DA3 `pointmaps[i]` and the decoded SAM3D pose for the reference image are
