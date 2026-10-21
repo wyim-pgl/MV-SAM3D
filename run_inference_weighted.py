@@ -4019,7 +4019,8 @@ Examples:
     # ========================================
     parser.add_argument("--run_pose_optimization", action="store_true",
                         help="Run pose optimization after inference (requires --da3_output). "
-                             "Optimizes object scale, rotation, and translation by aligning with DA3 point cloud.")
+                             "Optimizes rotation and translation against the DA3 point cloud. "
+                             "Add --pose_opt_optimize_scale to also optimize scale.")
     parser.add_argument("--pose_opt_iterations", type=int, default=300,
                         help="Pose optimization: number of iterations (default: 300)")
     parser.add_argument("--pose_opt_lr", type=float, default=0.01,
