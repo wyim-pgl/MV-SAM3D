@@ -3,6 +3,7 @@ SAM3 多物体分割模块
 """
 import os
 import sys
+from contextlib import nullcontext
 import torch
 import numpy as np
 from pathlib import Path
@@ -45,6 +46,37 @@ def select_instance_indices(masks, scores, expected_count, iou_threshold=0.5, re
     if len(selected) != expected_count:
         raise ValueError(f"Expected {expected_count} distinct instances, found {len(selected)}")
     return selected
+
+
+def select_instance_candidates(masks, scores, max_candidates, iou_threshold=0.5):
+    """Keep distinct, nonempty SAM3 proposals without requiring every view to
+    contain the same number. Cross-view tracking resolves identities later.
+    """
+    if (isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, (int, np.integer))
+            or max_candidates < 1):
+        raise ValueError('max_candidates must be a positive integer')
+    masks = np.asarray(masks, dtype=bool)
+    scores = np.asarray(scores)
+    if masks.ndim != 3 or scores.shape != (len(masks),) or not np.isfinite(scores).all():
+        raise ValueError('Expected masks (N,H,W) and finite scores (N,)')
+    selected, dropped = [], []
+    for index in np.argsort(-scores, kind='stable'):
+        index = int(index)
+        candidate = masks[index]
+        if not candidate.any():
+            reason = 'empty'
+        elif any(np.logical_and(candidate, masks[j]).sum() /
+                 np.logical_or(candidate, masks[j]).sum() > iou_threshold
+                 for j in selected):
+            reason = 'duplicate'
+        elif len(selected) == max_candidates:
+            reason = 'count_limit'
+        else:
+            selected.append(index)
+            continue
+        dropped.append({'index': index, 'score': float(scores[index]), 'reason': reason})
+    return selected, dropped
 
 
 def validate_object_name(object_name):
@@ -138,6 +170,148 @@ class SAM3MultiObjectSegmenter:
         )
         self.processor = Sam3Processor(model, confidence_threshold=confidence_threshold)
         logger.success("✓ SAM3 model loaded")
+
+    def segment_instances_multiview(
+        self,
+        images_dir: Path,
+        object_name: str,
+        text_prompt: str,
+        output_dir: Path,
+        expected_count: int,
+        tracking_views: Dict[str, Dict],
+        object_names: Optional[List[str]] = None,
+    ) -> Dict:
+        """Track separate same-prompt detections in the shared DA3 scene frame.
+
+        SAM3 is evaluated once per input view. Candidate masks are associated
+        across views by their DA3 pointmap positions, then written separately
+        under deterministic scene-position IDs. Unobserved views get explicit
+        empty RGBA masks so downstream multi-object inference can keep a
+        consistent image set.
+        """
+        from preprocessing.instance_tracking import track_instances
+
+        def natural_sort_key(path):
+            try:
+                return (0, int(path.stem), path.stem)
+            except ValueError:
+                return (1, 0, path.stem)
+
+        image_files = sorted(
+            list(images_dir.glob('*.png')) + list(images_dir.glob('*.jpg'))
+            + list(images_dir.glob('*.jpeg')), key=natural_sort_key)
+        if len(image_files) < 2:
+            raise ValueError('Automatic instance tracking requires at least two views')
+        if set(path.stem for path in image_files) != set(tracking_views):
+            raise ValueError('DA3 tracking views must match input images by filename stem')
+        if object_names is None:
+            object_names = [f'{object_name}_{i:02d}' for i in range(1, expected_count + 1)]
+        if len(object_names) != expected_count or len(set(object_names)) != expected_count:
+            raise ValueError('object_names must provide one unique output name per tracked instance')
+
+        output_dirs = [preflight_mask_outputs(image_files, output_dir, name)
+                       for name in object_names]
+        candidates_by_view, masks_by_view, view_reports = {}, {}, {}
+        use_cuda = torch.cuda.is_available()
+        inference_context = torch.autocast('cuda', dtype=torch.bfloat16) if use_cuda else nullcontext()
+
+        for view_index, image_path in enumerate(image_files):
+            image = Image.open(image_path).convert('RGB')
+            context = tracking_views[image_path.stem]
+            pointmap = np.asarray(context.get('pointmap'), dtype=float)
+            camera_to_scene = np.asarray(context.get('camera_to_scene'), dtype=float)
+            if (pointmap.ndim != 3 or pointmap.shape[-1] != 3
+                    or camera_to_scene.shape != (4, 4)
+                    or not np.isfinite(camera_to_scene).all()):
+                raise ValueError(f'{image_path.name}: invalid DA3 tracking context')
+
+            with torch.inference_mode(), inference_context:
+                inference_state = self.processor.set_image(image)
+                output = self.processor.set_text_prompt(state=inference_state, prompt=text_prompt)
+            raw_masks, raw_scores = output['masks'], output['scores']
+            masks = raw_masks.detach().cpu().numpy() if torch.is_tensor(raw_masks) else np.asarray(raw_masks)
+            scores = raw_scores.float().detach().cpu().numpy() if torch.is_tensor(raw_scores) else np.asarray(raw_scores)
+            if masks.ndim == 4 and masks.shape[1] == 1:
+                masks = masks[:, 0]
+            selected, dropped = select_instance_candidates(
+                masks, scores, max_candidates=max(16, expected_count * 4))
+            candidate_rows, candidate_masks = [], {}
+            for candidate_index in selected:
+                mask = np.asarray(masks[candidate_index], dtype=bool)
+                pointmap_mask = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize(
+                    (pointmap.shape[1], pointmap.shape[0]), Image.Resampling.NEAREST)) > 0
+                valid = pointmap_mask & np.isfinite(pointmap).all(axis=-1) & (pointmap[..., 2] > 0)
+                points = pointmap[valid]
+                if len(points) < 3:
+                    continue
+                if len(points) > 4096:
+                    points = points[np.linspace(0, len(points) - 1, 4096, dtype=int)]
+                points_h = np.column_stack((points, np.ones(len(points))))
+                scene_points = (camera_to_scene @ points_h.T).T[:, :3]
+                scene_points = scene_points[np.isfinite(scene_points).all(axis=1)]
+                if len(scene_points) < 3:
+                    continue
+                center = np.median(scene_points, axis=0)
+                bounds = np.percentile(scene_points, [5, 95], axis=0)
+                radius = max(float(np.linalg.norm(bounds[1] - bounds[0]) / 2), 1e-4)
+                candidate_rows.append({
+                    'candidate_index': int(candidate_index), 'center': center,
+                    'radius': radius, 'score': float(scores[candidate_index]),
+                })
+                # Store compressed binary masks once; avoid keeping RGBA images
+                # or full source frames in memory across the complete capture.
+                candidate_masks[int(candidate_index)] = mask.astype(np.uint8)
+            candidates_by_view[image_path.stem] = candidate_rows
+            masks_by_view[image_path.stem] = candidate_masks
+            view_reports[image_path.stem] = {
+                'image': image_path.name, 'candidate_count': len(scores),
+                'selected_count': len(candidate_rows), 'selected_indices': [
+                    row['candidate_index'] for row in candidate_rows],
+                'dropped_candidates': dropped,
+            }
+
+        tracking = track_instances(candidates_by_view, expected_count)
+        name_by_track = {f'instance_{index:02d}': name
+                         for index, name in enumerate(object_names, 1)}
+        for track_id, track in tracking['instances'].items():
+            mask_dir = output_dir / name_by_track[track_id]
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            track['object_name'] = name_by_track[track_id]
+            for image_path in image_files:
+                stem = image_path.stem
+                candidate = tracking['instances'][track_id]['views'][stem]
+                image = Image.open(image_path).convert('RGB')
+                rgba = np.zeros((image.height, image.width, 4), dtype=np.uint8)
+                if candidate is not None:
+                    mask = masks_by_view[stem][candidate['candidate_index']]
+                    mask = np.asarray(Image.fromarray(mask * 255).resize(
+                        image.size, Image.Resampling.NEAREST)) > 0
+                    rgb = np.asarray(image)
+                    rgba[mask, :3] = rgb[mask]
+                    rgba[mask, 3] = 255
+                Image.fromarray(rgba, 'RGBA').save(mask_dir / f'{stem}.png')
+                view_reports[stem].setdefault('instances', {})[track_id] = {
+                    'object_name': name_by_track[track_id],
+                    'selected_count': int(candidate is not None),
+                    'selected_indices': [] if candidate is None else [candidate['candidate_index']],
+                    'success': True, 'occluded': candidate is None,
+                }
+
+        return {
+            'success': True, 'object_name': object_name,
+            'text_prompt': text_prompt, 'expected_count': expected_count,
+            'total_views': len(image_files), 'success_views': len(image_files),
+            'views': [view_reports[path.stem] for path in image_files],
+            'tracking': tracking,
+            'objects': [
+                {'object_name': name_by_track[track_id], 'success': True,
+                 'expected_count': 1, 'failed_views': [], 'instance_tracking': True,
+                 'success_views': track['visible_views'], 'total_views': len(image_files),
+                 'views': [view_reports[path.stem]['instances'][track_id]
+                           | {'image': path.name} for path in image_files]}
+                for track_id, track in tracking['instances'].items()
+            ],
+        }
     
     def segment_object_multiview(
         self,

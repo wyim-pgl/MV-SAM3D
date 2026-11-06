@@ -35,6 +35,17 @@ class MaskSelectionTests(unittest.TestCase):
         masks = np.eye(8, dtype=bool).reshape(8, 2, 4)
         self.assertEqual(self.select(masks, np.arange(8)/10, 7), [7,6,5,4,3,2,1])
 
+    def test_instance_split_keeps_candidates_separate_and_allows_occlusion(self):
+        masks = np.zeros((4, 8, 8), dtype=bool)
+        masks[0, :2, :2] = True
+        masks[1] = masks[0]  # duplicate proposal with a higher SAM3 score
+        masks[2, 4:6, 4:6] = True
+        indices, dropped = sam3_segmenter.select_instance_candidates(
+            masks, np.array([.8, .9, .7, .6]), max_candidates=6)
+        self.assertEqual(indices, [1, 2])
+        self.assertEqual([(item['index'], item['reason']) for item in dropped],
+                         [(0, 'duplicate'), (3, 'empty')])
+
 
 if __name__ == '__main__':
     unittest.main()

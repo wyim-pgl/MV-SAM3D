@@ -90,6 +90,43 @@ without proving that all remaining shape errors have been explained.
    captured scenes. Keep physical measurements, generation repeatability and
    calibration uncertainty separate.
 
+## Automatic IDs for multiple seeds
+
+Use `--track_instances` when one prompt refers to several physical seeds. SAM3
+runs once per photograph, then its candidate masks are matched automatically
+across views using DA3 pointmaps in the aligned scene frame. The resulting
+`seed_01`, `seed_02`, ... folders contain one mask per seed and are ready for
+the existing multi-object reconstruction/merge path; no per-photo ID labeling
+is needed.
+
+```bash
+python preprocessing/build_mvsam3d_dataset.py \
+  --input data/my-seed-capture \
+  --objects seed,ball \
+  --prompts "seed,ping pong ball" \
+  --counts 3,1 \
+  --track_instances \
+  --run_da3
+
+python run_inference_weighted.py \
+  --input_path data/my-seed-capture \
+  --mask_prompt seed_01,seed_02,seed_03,ball \
+  --da3_output da3_outputs/my-seed-capture/da3_output.npz
+```
+
+The count is the expected number of distinct instances in the capture. At
+least one clear reference photograph must show every requested instance;
+instances must be spatially separated enough for unambiguous matching, and
+each needs support in multiple views. The run fails with a report if positions
+are ambiguous or an instance is seen too few times. Explicit transparent masks
+record ordinary occlusions in individual views. IDs are ordered by position in
+the aligned DA3 frame, so keep the capture and alignment when comparing IDs
+between runs. DA3 cache reuse checks SHA-256 hashes of the current images;
+missing or mismatched input manifests trigger a fresh DA3 run. The sphere still
+gives one shared metric scale; it does not
+validate each seed's reconstructed dimensions. Measure each seed independently
+when checking its physical ratio.
+
 <details>
 <summary>Completed input-check commands (reference only)</summary>
 
