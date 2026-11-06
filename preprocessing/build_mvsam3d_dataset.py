@@ -16,6 +16,7 @@ MV-SAM3D 数据预处理主脚本
 """
 import sys
 import json
+import hashlib
 import argparse
 import subprocess
 from pathlib import Path
@@ -27,9 +28,26 @@ from data_organizer import organize_images
 from sam3_segmenter import (
     SAM3MultiObjectSegmenter, preflight_mask_outputs, reject_source_aliases,
 )
+from instance_tracking import load_da3_tracking_views
 
 
-def run_da3(scene_dir: Path) -> bool:
+def _da3_input_manifest(images_dir: Path) -> Dict:
+    """Fingerprint ordered DA3 inputs so same-named replacement captures miss cache."""
+    image_files = sorted(
+        [path for path in images_dir.iterdir()
+         if path.is_file() and path.suffix.lower() in {'.png', '.jpg', '.jpeg'}],
+        key=lambda path: path.name,
+    )
+    return {
+        'images': [
+            {'name': path.name, 'size': path.stat().st_size,
+             'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in image_files
+        ]
+    }
+
+
+def run_da3(scene_dir: Path, force: bool = False) -> bool:
     """
     运行 DA3 处理
     
@@ -49,11 +67,20 @@ def run_da3(scene_dir: Path) -> bool:
     scene_name = scene_dir.name
     output_path = Path("da3_outputs") / scene_name / "da3_output.npz"
     
-    # 检查是否已经处理过
-    if output_path.exists():
-        logger.info(f"  DA3 output already exists: {output_path}")
-        logger.info(f"  Skipping DA3 processing")
-        return True
+    manifest_path = output_path.parent / 'da3_input_manifest.json'
+    input_manifest = _da3_input_manifest(images_dir)
+    scene_glb = output_path.parent / 'scene.glb'
+    if not force and output_path.is_file() and scene_glb.is_file() and manifest_path.is_file():
+        try:
+            cached_manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError):
+            cached_manifest = None
+        if cached_manifest == input_manifest:
+            logger.info(f"  DA3 output matches current image contents: {output_path}")
+            logger.info("  Skipping DA3 processing")
+            return True
+    elif output_path.exists():
+        logger.info('  DA3 cache is missing its input manifest or force refresh was requested')
     
     # 运行 DA3（注意参数名称是 --image_dir 和 --output_dir）
     output_dir = output_path.parent
@@ -67,12 +94,17 @@ def run_da3(scene_dir: Path) -> bool:
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if not output_path.is_file() or not scene_glb.is_file():
+            raise RuntimeError('DA3 command succeeded but did not produce da3_output.npz and scene.glb')
+        temporary_manifest = manifest_path.with_suffix('.json.tmp')
+        temporary_manifest.write_text(json.dumps(input_manifest, indent=2))
+        temporary_manifest.replace(manifest_path)
         logger.success(f"✓ DA3 completed: {output_path}")
         return True
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
         logger.error(f"  DA3 failed: {e}")
-        logger.error(f"  stdout: {e.stdout}")
-        logger.error(f"  stderr: {e.stderr}")
+        logger.error(f"  stdout: {getattr(e, 'stdout', None)}")
+        logger.error(f"  stderr: {getattr(e, 'stderr', None)}")
         return False
 
 
@@ -85,6 +117,7 @@ def process_scene(
     sam3_root: Path = None,
     counts: Dict[str, int] = None,
     confidence_threshold: float = 0.1,
+    track_instances: bool = False,
 ) -> Dict:
     """
     处理单个场景
@@ -124,7 +157,18 @@ def process_scene(
     reject_source_aliases([report_path], sources)
     if not objects:
         raise ValueError('At least one object is required')
-    for obj_name in objects:
+    counts = counts or {}
+    if track_instances and not any(counts.get(name, 1) > 1 for name in objects):
+        raise ValueError('--track_instances requires at least one object with --counts > 1')
+    output_names = {
+        name: ([f'{name}_{index:02d}' for index in range(1, counts.get(name, 1) + 1)]
+               if track_instances and counts.get(name, 1) > 1 else [name])
+        for name in objects
+    }
+    flat_names = [name for names in output_names.values() for name in names]
+    if len(flat_names) != len(set(flat_names)):
+        raise ValueError('Tracked instance output names collide; choose distinct --objects names')
+    for obj_name in flat_names:
         mask_dir = preflight_mask_outputs(planned, scene_dir, obj_name)
         reject_source_aliases([mask_dir / f'{p.stem}.png' for p in planned], sources)
 
@@ -142,6 +186,40 @@ def process_scene(
         return result
     
     images_dir = scene_dir / "images"
+
+    # Tracking needs the DA3 pointmaps before SAM3 candidates can be assigned
+    # stable scene-position IDs. Legacy runs retain the existing DA3-after-SAM3
+    # order; tracked runs reuse a cached DA3 result or compute it now.
+    tracking_views = None
+    tracking_da3_result = None
+    if track_instances:
+        da3_path = Path('da3_outputs') / scene_dir.name / 'da3_output.npz'
+        try:
+            tracking_da3_ok = run_da3(scene_dir, run_da3_flag)
+        except Exception as exc:
+            tracking_da3_ok = False
+            tracking_da3_result = {'success': False, 'error': str(exc)}
+        else:
+            tracking_da3_result = {
+                'success': tracking_da3_ok,
+                'forced_refresh': bool(run_da3_flag),
+                'input_manifest': str(da3_path.parent / 'da3_input_manifest.json'),
+            }
+        if not tracking_da3_ok:
+            result['steps']['da3'] = tracking_da3_result
+            result['error'] = 'DA3 could not produce tracking geometry for the current images'
+            report_path.write_text(json.dumps(result, indent=2, default=str))
+            return result
+        try:
+            tracking_views = load_da3_tracking_views(
+                da3_path, [path.name for path in sorted(
+                    list(images_dir.glob('*.png')) + list(images_dir.glob('*.jpg'))
+                    + list(images_dir.glob('*.jpeg')))])
+        except Exception as exc:
+            result['steps']['da3'] = tracking_da3_result
+            result['error'] = str(exc)
+            report_path.write_text(json.dumps(result, indent=2, default=str))
+            return result
     
     # Step 2: SAM3 分割
     logger.info("\n[Step 2/3] SAM3 segmentation...")
@@ -169,19 +247,39 @@ def process_scene(
             prompt = obj_name
         
         # 分割
-        try:
-            seg_result = segmenter.segment_object_multiview(
-                images_dir=images_dir,
-                object_name=obj_name,
-                text_prompt=prompt,
-                output_dir=scene_dir,
-                expected_count=counts.get(obj_name, 1) if counts else 1,
-            )
-        except Exception as exc:
-            seg_result = {'object_name': obj_name, 'success': False, 'error': str(exc)}
-        seg_results.append(seg_result)
+        if track_instances and counts.get(obj_name, 1) > 1:
+            try:
+                seg_result = segmenter.segment_instances_multiview(
+                    images_dir=images_dir, object_name=obj_name, text_prompt=prompt,
+                    output_dir=scene_dir, expected_count=counts[obj_name],
+                    tracking_views=tracking_views, object_names=output_names[obj_name])
+                seg_results.extend(seg_result['objects'])
+            except Exception as exc:
+                seg_results.append({'object_name': obj_name, 'success': False,
+                                    'expected_count': counts[obj_name], 'views': [],
+                                    'total_views': len(tracking_views), 'success_views': 0,
+                                    'failed_views': [], 'error': str(exc),
+                                    'instance_tracking': True})
+        else:
+            try:
+                seg_result = segmenter.segment_object_multiview(
+                    images_dir=images_dir,
+                    object_name=obj_name,
+                    text_prompt=prompt,
+                    output_dir=scene_dir,
+                    expected_count=counts.get(obj_name, 1),
+                )
+            except Exception as exc:
+                seg_result = {'object_name': obj_name, 'success': False, 'error': str(exc)}
+            seg_results.append(seg_result)
     
     result['steps']['segmentation'] = seg_results
+    if track_instances:
+        result['instance_tracking'] = {
+            'enabled': True, 'method': 'da3_pointmap_scene_position',
+            'prompts': {name: prompts.get(name, name) if prompts else name for name in objects},
+            'object_names': output_names,
+        }
     
     # 检查是否所有物体都成功分割
     all_success = all(r['success'] for r in seg_results)
@@ -189,9 +287,12 @@ def process_scene(
         logger.warning("  Some objects failed to segment")
     
     # Step 3: DA3 处理
-    if run_da3_flag and all_success:
+    if track_instances:
+        logger.info("\n[Step 3/3] DA3 processing completed before tracking.")
+        result['steps']['da3'] = tracking_da3_result
+    elif run_da3_flag and all_success:
         logger.info("\n[Step 3/3] DA3 processing...")
-        da3_success = run_da3(scene_dir)
+        da3_success = run_da3(scene_dir, force=True)
         result['steps']['da3'] = {'success': da3_success}
     else:
         logger.info("\n[Step 3/3] DA3 skipped (requires --run_da3 and masks for every view)")
@@ -231,7 +332,10 @@ def main():
     parser.add_argument("--data_dir", type=str, default="data", help="Base data directory for batch mode")
     
     # DA3
-    parser.add_argument("--run_da3", action="store_true", help="Run DA3 after segmentation")
+    parser.add_argument("--run_da3", action="store_true",
+                        help="Run DA3 (before tracked segmentation, after legacy segmentation)")
+    parser.add_argument("--track_instances", action="store_true",
+                        help="Automatically assign stable IDs to same-prompt instances using DA3 3D positions")
     
     # SAM3
     parser.add_argument("--sam3_checkpoint", type=str, default=None,
@@ -245,6 +349,8 @@ def main():
         parser.error('--confidence_threshold must be in [0,1]')
     if args.batch and (args.prompts is not None or args.counts is not None):
         parser.error('--prompts and --counts require single-scene --input mode')
+    if args.batch and args.track_instances:
+        parser.error('--track_instances requires single-scene mode with explicit --counts')
     
     # 批量处理模式
     if args.batch:
@@ -281,6 +387,7 @@ def main():
                 sam3_checkpoint=Path(args.sam3_checkpoint) if args.sam3_checkpoint else None,
                 sam3_root=Path(args.sam3_root) if args.sam3_root else None,
                 confidence_threshold=args.confidence_threshold,
+                track_instances=args.track_instances,
             )
             results.append(result)
         
@@ -320,6 +427,8 @@ def main():
             parser.error('--prompts must contain one nonempty prompt per object')
         if len(counts) != len(objects) or any(c < 1 for c in counts):
             parser.error('--counts must contain one positive integer per object')
+        if args.track_instances and not any(count > 1 for count in counts):
+            parser.error('--track_instances requires at least one --counts value greater than 1')
         
         result = process_scene(
             scene_dir=scene_dir,
@@ -330,6 +439,7 @@ def main():
             prompts=dict(zip(objects, prompts)),
             counts=dict(zip(objects, counts)),
             confidence_threshold=args.confidence_threshold,
+            track_instances=args.track_instances,
         )
         
         if not result['success']:

@@ -279,6 +279,105 @@ def test_complete_report_loads_and_unrelated_object_is_rejected(modules, tmp_pat
         loader.load_images_and_masks_from_path(tmp_path, 'other')
 
 
+def test_report_allows_only_explicit_tracked_occlusion(modules, tmp_path):
+    sam, loader = modules
+    images = scene(tmp_path, 2)
+    masks = tmp_path / 'seed_01'
+    masks.mkdir()
+    Image.new('RGBA', (8, 8), (0, 0, 0, 255)).save(masks / '0.png')
+    Image.new('RGBA', (8, 8), (0, 0, 0, 0)).save(masks / '1.png')
+    entry = {
+        'object_name': 'seed_01', 'success': True, 'expected_count': 1,
+        'failed_views': [], 'instance_tracking': True, 'total_views': 2,
+        'success_views': 1,
+        'views': [
+            {'image': '0.png', 'success': True, 'selected_count': 1,
+             'selected_indices': [2], 'occluded': False},
+            {'image': '1.png', 'success': True, 'selected_count': 0,
+             'selected_indices': [], 'occluded': True},
+        ],
+    }
+    report = {'success': True, 'instance_tracking': {'enabled': True},
+              'steps': {'segmentation': [entry]}}
+    (tmp_path / 'segmentation_report.json').write_text(json.dumps(report))
+    assert loader.load_images_and_masks_from_path(tmp_path, 'seed_01')[2] == ['0', '1']
+
+    entry['views'][1]['occluded'] = False
+    (tmp_path / 'segmentation_report.json').write_text(json.dumps(report))
+    with pytest.raises(ValueError, match='report'):
+        loader.load_images_and_masks_from_path(tmp_path, 'seed_01')
+
+
+def test_tracked_scene_runs_da3_first_and_emits_each_instance(modules, tmp_path, monkeypatch):
+    sam, _ = modules
+    scene(tmp_path, 2)
+    monkeypatch.syspath_prepend(str(ROOT / 'preprocessing'))
+    monkeypatch.setitem(sys.modules, 'sam3_segmenter', sam)
+    build = load_module('tracked_build', ROOT / 'preprocessing/build_mvsam3d_dataset.py')
+    calls = []
+
+    class Segmenter:
+        def segment_object_multiview(self, **kwargs):
+            pytest.fail('tracked same-prompt instances must not be unioned')
+
+        def segment_instances_multiview(self, **kwargs):
+            calls.append(('segment', kwargs['object_names']))
+            return {'objects': [
+                {'object_name': name, 'success': True, 'expected_count': 1,
+                 'failed_views': [], 'instance_tracking': True,
+                 'success_views': 2, 'total_views': 2, 'views': []}
+                for name in kwargs['object_names']
+            ]}
+
+    monkeypatch.setattr(build, 'run_da3', lambda *_: calls.append(('da3',)) or True)
+    monkeypatch.setattr(build, 'load_da3_tracking_views',
+                        lambda *_: calls.append(('load_tracking',)) or {'0': {}, '1': {}})
+    monkeypatch.setattr(build, 'SAM3MultiObjectSegmenter',
+                        lambda **_: calls.append(('sam3_init',)) or Segmenter())
+    result = build.process_scene(
+        tmp_path, ['seed'], prompts={'seed': 'yellow seed'}, counts={'seed': 2},
+        run_da3_flag=True, track_instances=True)
+
+    assert result['success']
+    assert [entry['object_name'] for entry in result['steps']['segmentation']] == [
+        'seed_01', 'seed_02']
+    assert calls == [('da3',), ('load_tracking',), ('sam3_init',),
+                     ('segment', ['seed_01', 'seed_02'])]
+    assert result['instance_tracking']['enabled']
+
+
+def test_da3_cache_is_keyed_by_image_contents(modules, tmp_path, monkeypatch):
+    sam, _ = modules
+    images = scene(tmp_path, 1)
+    monkeypatch.chdir(tmp_path)
+    build = load_module('manifest_build', ROOT / 'preprocessing/build_mvsam3d_dataset.py')
+    output_dir = tmp_path / 'da3_outputs' / tmp_path.name
+    output_dir.mkdir(parents=True)
+    (output_dir / 'da3_output.npz').write_bytes(b'cached points')
+    (output_dir / 'scene.glb').write_bytes(b'cached scene')
+    manifest_path = output_dir / 'da3_input_manifest.json'
+    manifest_path.write_text(json.dumps(build._da3_input_manifest(images)))
+
+    calls = []
+    monkeypatch.setattr(build.subprocess, 'run',
+                        lambda *args, **kwargs: calls.append(args[0]))
+    assert build.run_da3(tmp_path) is True
+    assert calls == []
+
+    Image.new('RGB', (8, 8), (1, 2, 3)).save(images / '0.png')
+
+    def regenerate(command, **kwargs):
+        calls.append(command)
+        (output_dir / 'da3_output.npz').write_bytes(b'fresh points')
+        (output_dir / 'scene.glb').write_bytes(b'fresh scene')
+        return object()
+
+    monkeypatch.setattr(build.subprocess, 'run', regenerate)
+    assert build.run_da3(tmp_path) is True
+    assert len(calls) == 1
+    assert json.loads(manifest_path.read_text()) == build._da3_input_manifest(images)
+
+
 @pytest.mark.parametrize('failure', ['corrupt', 'write_false', 'write_error'])
 def test_loose_organization_failure_blocks_models(modules, tmp_path, monkeypatch, failure):
     sam, loader = modules

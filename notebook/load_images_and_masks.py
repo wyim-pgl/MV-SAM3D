@@ -24,19 +24,44 @@ def validate_segmentation_report(directory: Path, mask_prompt=None):
         entries = report['steps']['segmentation']
         if not isinstance(entries, list) or not entries:
             raise ValueError('missing segmentation results')
+        tracking_enabled = (isinstance(report.get('instance_tracking'), dict)
+                            and report['instance_tracking'].get('enabled') is True)
         for entry in entries:
+            tracked_entry = (isinstance(entry, dict) and tracking_enabled
+                             and entry.get('instance_tracking') is True)
             if (not isinstance(entry, dict) or entry.get('success') is not True
                     or not isinstance(entry.get('object_name'), str)
                     or entry.get('failed_views') != []
                     or not isinstance(entry.get('views'), list) or not entry['views']
                     or entry.get('total_views') != len(entry['views'])
-                    or entry.get('success_views') != len(entry['views'])
+                    or (not tracked_entry and entry.get('success_views') != len(entry['views']))
                     or type(entry.get('expected_count')) is not int or entry['expected_count'] < 1
                     or any(not isinstance(v, dict) or not isinstance(v.get('image'), str)
                            or 'error' in v or v.get('success', True) is not True
-                           or v.get('selected_count') != entry['expected_count']
+                           or (v.get('selected_count') != entry['expected_count']
+                               and not (tracked_entry and v.get('occluded') is True
+                                        and v.get('selected_count') == 0))
                            for v in entry['views'])):
                 raise ValueError('incomplete segmentation results')
+            if tracked_entry:
+                visible_views = 0
+                for view in entry['views']:
+                    is_occluded = view.get('occluded') is True
+                    if is_occluded:
+                        if view.get('selected_count') != 0 or view.get('selected_indices') != []:
+                            raise ValueError('invalid tracked occlusion report')
+                    else:
+                        visible_views += 1
+                        if view.get('selected_count') != 1 or view.get('occluded') is not False:
+                            raise ValueError('invalid tracked visible instance report')
+                    mask_path = directory / entry['object_name'] / f"{Path(view['image']).stem}.png"
+                    if not mask_path.is_file():
+                        raise ValueError(f'missing tracked instance mask {mask_path}')
+                    with Image.open(mask_path) as mask:
+                        if mask.mode != 'RGBA':
+                            raise ValueError(f'tracked instance mask must be RGBA: {mask_path}')
+                if entry.get('success_views') != visible_views:
+                    raise ValueError('tracked visible view count does not match report')
             if len({Path(v['image']).stem for v in entry['views']}) != len(entry['views']):
                 raise ValueError('duplicate segmentation view identities')
         if mask_prompt is not None and not any(e['object_name'] == mask_prompt for e in entries):
