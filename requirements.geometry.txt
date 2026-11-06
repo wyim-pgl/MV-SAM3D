@@ -1,0 +1,2 @@
+# Optional postprocessing, used with the existing mvsam3d / PyTorch3D environment.
+fast-simplification==0.1.12

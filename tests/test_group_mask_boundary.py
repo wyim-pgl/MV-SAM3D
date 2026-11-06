@@ -350,6 +350,8 @@ def test_da3_cache_is_keyed_by_image_contents(modules, tmp_path, monkeypatch):
     sam, _ = modules
     images = scene(tmp_path, 1)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(ROOT / 'preprocessing'))
+    monkeypatch.setitem(sys.modules, 'sam3_segmenter', sam)
     build = load_module('manifest_build', ROOT / 'preprocessing/build_mvsam3d_dataset.py')
     output_dir = tmp_path / 'da3_outputs' / tmp_path.name
     output_dir.mkdir(parents=True)
